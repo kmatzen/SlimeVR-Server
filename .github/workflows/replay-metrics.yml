@@ -1,0 +1,77 @@
+name: replay-metrics
+
+# Runs the skeleton replay regression suite and publishes its metrics table.
+#
+# The suite itself also runs as part of the normal test tasks. This workflow
+# exists to make the *numbers* visible on every PR rather than only a pass/fail:
+# most changes to the tracking stack are trade-offs -- less foot slide for more
+# latency, less floor clip for more jitter -- and a reviewer needs to see the
+# trade, which a bare green check hides.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'server/core/src/main/java/dev/slimevr/tracking/**'
+      - 'server/core/src/main/java/dev/slimevr/metrics/**'
+      - 'server/core/src/test/java/dev/slimevr/replay/**'
+      - 'server/core/src/test/resources/replay-baseline.txt'
+      - '.github/workflows/replay-metrics.yml'
+  pull_request:
+    paths:
+      - 'server/core/src/main/java/dev/slimevr/tracking/**'
+      - 'server/core/src/main/java/dev/slimevr/metrics/**'
+      - 'server/core/src/test/java/dev/slimevr/replay/**'
+      - 'server/core/src/test/resources/replay-baseline.txt'
+      - '.github/workflows/replay-metrics.yml'
+  workflow_dispatch:
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Run replay suite
+        id: replay
+        run: |
+          set -o pipefail
+          ./gradlew :server:core:test --tests 'dev.slimevr.replay.*' \
+            --info --console=plain 2>&1 | tee replay-output.txt
+
+      - name: Publish metrics table
+        if: always()
+        run: |
+          {
+            echo '## Skeleton replay metrics'
+            echo
+            echo '```'
+            grep -E '^\s+(metric|stand|squat|walk-in-place|lean)/?' replay-output.txt \
+              || echo 'no metrics table found'
+            echo '```'
+            echo
+            echo '<details><summary>Replay determinism</summary>'
+            echo
+            echo '```'
+            grep -E 'drift between identical runs|squat floor clip|squat foot slide' \
+              replay-output.txt || echo 'none reported'
+            echo '```'
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: replay-metrics
+          path: |
+            replay-output.txt
+            server/core/build/reports/tests/test/**
+          if-no-files-found: warn

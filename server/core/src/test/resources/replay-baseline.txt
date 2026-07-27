@@ -1,0 +1,43 @@
+# skeleton replay baseline
+# key  value  tolerance
+#
+# Covers only the deterministic configuration (leg corrections disabled).
+# Replay of that path is bit-reproducible, so tolerances are tight on purpose
+# -- they are set from measured spread, and the measured spread is zero.
+#
+# The skating-correction path is NOT covered here: LegTweaksBuffer stamps
+# frames with System.nanoTime(), so identical input can produce different
+# output run to run. See clockDependentStagesAreOnlyApproximatelyReproducible.
+# Those metrics can join this file once an injectable clock lands.
+#
+# Regenerating this file is how a real regression gets blessed as expected
+# behaviour. Read the diff first.
+
+stand/foot_slide_m_per_sec                       0.000000     0.000100
+stand/foot_slide_total_m                         0.000000     0.000100
+stand/floor_clip_mean_m                          0.000000     0.000100
+stand/floor_clip_max_m                           0.000000     0.000100
+stand/floor_clip_fraction                        0.000000     0.000100
+stand/foot_height_disagreement_m                 0.000000     0.000100
+stand/height_m                                   1.580000     0.031700
+squat/foot_slide_m_per_sec                       0.050289     0.001106
+squat/foot_slide_total_m                         0.402317     0.008146
+squat/floor_clip_mean_m                          0.141896     0.002938
+squat/floor_clip_max_m                           0.233865     0.004777
+squat/floor_clip_fraction                        0.997500     0.020050
+squat/foot_height_disagreement_m                 0.000000     0.000100
+squat/height_m                                   1.580000     0.031700
+walk-in-place/foot_slide_m_per_sec               0.308897     0.006278
+walk-in-place/foot_slide_total_m                 1.754549     0.035191
+walk-in-place/floor_clip_mean_m                  0.000000     0.000100
+walk-in-place/floor_clip_max_m                   0.000000     0.000100
+walk-in-place/floor_clip_fraction                0.000000     0.000100
+walk-in-place/foot_height_disagreement_m         0.019261     0.000485
+walk-in-place/height_m                           1.580000     0.031700
+lean/foot_slide_m_per_sec                        0.164599     0.003392
+lean/foot_slide_total_m                          1.316805     0.026436
+lean/floor_clip_mean_m                           0.000000     0.000100
+lean/floor_clip_max_m                            0.000000     0.000100
+lean/floor_clip_fraction                         0.000000     0.000100
+lean/foot_height_disagreement_m                  0.000000     0.000100
+lean/height_m                                    1.580000     0.031700
