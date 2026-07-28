@@ -81,6 +81,19 @@ class UDPDevice(
 
 	var firmwareFeatures = FirmwareFeatures()
 
+	/**
+	 * Estimate of this tracker's clock relative to the server's.
+	 *
+	 * Every tracker's clock starts at an arbitrary moment and runs at its own
+	 * rate, so without this the skeleton is solved from observations taken at
+	 * different instants -- harmless with one tracker, a correctness problem
+	 * with sixteen.
+	 */
+	val clockSync = ClockSync()
+
+	var lastTimeSyncPacketTime: Long = 0
+	var lastTimeSyncTxMicros: Long = 0
+
 	fun isNextPacket(packetId: Long): Boolean {
 		val now = System.currentTimeMillis()
 		if (now - lastPacketCounterReset >= 10_000L) {

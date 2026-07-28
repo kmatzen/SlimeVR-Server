@@ -16,6 +16,9 @@ class FirmwareFeatures {
 		B64_WIFI_SCANNING,
 		SENSOR_CONFIG,
 
+		/** Firmware answers PACKET_TIME_SYNC (28) with its own clock readings. */
+		TIME_SYNC,
+
 		BITS_TOTAL,
 	}
 

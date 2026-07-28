@@ -409,6 +409,39 @@ data class UDPPacket27Position(
 	}
 }
 
+/**
+ * Round-trip clock synchronisation, the four-timestamp NTP exchange.
+ *
+ * The server writes its transmit time and sends; the tracker fills in the two
+ * timestamps from its own microsecond clock and echoes it back. The server then
+ * has all four times and can estimate the offset and rate of that tracker's
+ * clock -- see [ClockSync].
+ *
+ * Tracker timestamps are 32-bit because that is what `micros()` returns on an
+ * ESP; they wrap every ~71.6 minutes and must be unwrapped before use.
+ */
+data class UDPPacket28TimeSync(
+	/** Server transmit time, microseconds, echoed back unmodified. */
+	var serverTxMicros: Long = 0,
+	/** Tracker clock when it received the request. */
+	var trackerRxMicros: Long = 0,
+	/** Tracker clock when it sent the reply. */
+	var trackerTxMicros: Long = 0,
+) : UDPPacket(28) {
+	override fun readData(buf: ByteBuffer) {
+		serverTxMicros = buf.long
+		trackerRxMicros = buf.int.toLong() and 0xFFFFFFFFL
+		trackerTxMicros = buf.int.toLong() and 0xFFFFFFFFL
+	}
+
+	override fun writeData(buf: ByteBuffer) {
+		buf.putLong(serverTxMicros)
+		// Zeroed on the outbound leg; the tracker fills these in.
+		buf.putInt(0)
+		buf.putInt(0)
+	}
+}
+
 data class UDPPacket200ProtocolChange(
 	var targetProtocol: Int = 0,
 	var targetProtocolVersion: Int = 0,
