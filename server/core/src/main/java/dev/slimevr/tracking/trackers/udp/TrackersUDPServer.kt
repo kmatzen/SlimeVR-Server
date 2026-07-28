@@ -373,6 +373,31 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 								conn.serialBuffer.setLength(0)
 							}
 
+							// Clock sync, only to firmware that answers it. Shares
+							// the ping cadence: one exchange per 500 ms gives a
+							// minute of history in the estimator's window, which
+							// is a long enough baseline to see tens of ppm of
+							// drift above the noise.
+							if (conn.firmwareFeatures.has(
+									FirmwareFeatures.FirmwareFeatureFlags.TIME_SYNC,
+								) &&
+								conn.lastTimeSyncPacketTime + 500 <
+								System.currentTimeMillis()
+							) {
+								conn.lastTimeSyncPacketTime = System.currentTimeMillis()
+								conn.lastTimeSyncTxMicros = System.nanoTime() / 1000
+								bb.limit(bb.capacity())
+								bb.rewind()
+								bb.putInt(UDPProtocolParser.PACKET_TIME_SYNC)
+								bb.putLong(0)
+								bb.putLong(conn.lastTimeSyncTxMicros)
+								bb.putInt(0)
+								bb.putInt(0)
+								socket.send(
+									DatagramPacket(rcvBuffer, bb.position(), conn.address),
+								)
+							}
+
 							if (conn.lastPingPacketTime + 500 < System.currentTimeMillis()) {
 								conn.lastPingPacketId = random.nextInt()
 								conn.lastPingPacketTime = System.currentTimeMillis()
@@ -453,6 +478,30 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 					tracker.setAcceleration(packet.acceleration)
 				} else {
 					tracker.setAcceleration(SENSOR_OFFSET_CORRECTION.sandwich(packet.acceleration))
+				}
+			}
+
+			is UDPPacket28TimeSync -> {
+				if (connection == null) return
+				// Fourth timestamp is taken here, as close to the read as
+				// possible: anything between arrival and this point is charged
+				// to the return path and biases the offset.
+				val serverRx = System.nanoTime() / 1000
+				if (packet.serverTxMicros != connection.lastTimeSyncTxMicros) {
+					// A stale reply from an earlier exchange. Its round trip is
+					// not what we measured, so it would corrupt the estimate.
+					LogManager.debug(
+						"[TrackerServer] Discarding stale time sync reply from ${connection.name}",
+					)
+				} else {
+					val rx = connection.clockSync.unwrapTrackerMicros(packet.trackerRxMicros)
+					val tx = connection.clockSync.unwrapTrackerMicros(packet.trackerTxMicros)
+					connection.clockSync.addExchange(
+						packet.serverTxMicros,
+						rx,
+						tx,
+						serverRx,
+					)
 				}
 			}
 
