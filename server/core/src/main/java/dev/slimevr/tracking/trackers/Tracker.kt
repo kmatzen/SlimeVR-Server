@@ -112,6 +112,18 @@ class Tracker @JvmOverloads constructor(
 	 */
 	val usesSleep: Boolean = false,
 ) {
+
+	/**
+	 * Server-timebase microsecond time at which this tracker's most recent
+	 * sample was taken, or 0 if the tracker does not report one.
+	 *
+	 * Derived from the tracker's own clock via its ClockSync estimate, so it is
+	 * directly comparable between trackers. This is what a future interpolation
+	 * step needs in order to bring every tracker onto a common tick before the
+	 * skeleton is solved; nothing consumes it yet.
+	 */
+	var lastSampleServerMicros: Long = 0
+
 	private val timer = BufferedTimer(1f)
 	private var timeAtLastUpdate: Long = System.currentTimeMillis()
 	private var timeScheduledSleep: Long = Long.MAX_VALUE

@@ -442,6 +442,34 @@ data class UDPPacket28TimeSync(
 	}
 }
 
+/**
+ * Rotation carrying the tracker's own measurement time.
+ *
+ * Identical to [UDPPacket17RotationData] with a trailing 32-bit timestamp, so
+ * the sample can be converted into the server's timebase instead of being
+ * assumed to have happened the instant it arrived.
+ *
+ * Sent only to servers that advertise [ServerFeatureFlags.PROTOCOL_SAMPLE_TIMESTAMPS],
+ * so older servers never see it.
+ */
+data class UDPPacket29RotationDataTimestamped(
+	var rotation: Quaternion = Quaternion.IDENTITY,
+	var dataType: Int = 0,
+	var calibrationInfo: Int = 0,
+	/** Raw tracker `micros()`; wraps every ~71.6 minutes and must be unwrapped. */
+	var timestampMicros: Long = 0,
+) : UDPPacket(29),
+	SensorSpecificPacket {
+	override var sensorId: Int = 0
+	override fun readData(buf: ByteBuffer) {
+		sensorId = buf.get().toInt() and 0xFF
+		dataType = buf.get().toInt() and 0xFF
+		rotation = UDPUtils.getSafeBufferQuaternion(buf)
+		calibrationInfo = buf.get().toInt() and 0xFF
+		timestampMicros = buf.int.toLong() and 0xFFFFFFFFL
+	}
+}
+
 data class UDPPacket200ProtocolChange(
 	var targetProtocol: Int = 0,
 	var targetProtocolVersion: Int = 0,
