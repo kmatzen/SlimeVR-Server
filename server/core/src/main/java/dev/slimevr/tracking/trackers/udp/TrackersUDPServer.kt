@@ -467,6 +467,33 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 				}
 			}
 
+			is UDPPacket29RotationDataTimestamped -> {
+				if (connection == null) return
+				val tracker = connection.getTracker(packet.sensorId) ?: return
+				if (tracker.status == TrackerStatus.DISCONNECTED) tracker.status = TrackerStatus.OK
+
+				// Convert the tracker's own measurement time into server time.
+				// Until the clock estimate converges this is a pass-through, so
+				// there is no startup special case -- it simply starts out no
+				// worse than arrival-stamping.
+				val trackerMicros =
+					connection.clockSync.unwrapTrackerMicros(packet.timestampMicros)
+				tracker.lastSampleServerMicros =
+					connection.clockSync.toServerMicros(trackerMicros)
+
+				val rot29 = AXES_OFFSET * packet.rotation
+				when (packet.dataType) {
+					UDPPacket17RotationData.DATA_TYPE_NORMAL -> {
+						tracker.setRotation(rot29)
+						tracker.dataTick()
+					}
+
+					UDPPacket17RotationData.DATA_TYPE_CORRECTION -> {
+						// Not implemented in server, as with packet 17.
+					}
+				}
+			}
+
 			is UDPPacket18MagnetometerAccuracy -> {}
 
 			is UDPPacket4Acceleration -> {
