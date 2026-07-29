@@ -17,6 +17,7 @@ argued about with numbers instead of impressions.
 | --- | --- |
 | `SyntheticMotion.kt` | deterministic tracker motion — `stand`, `squat`, `walk-in-place`, `lean` |
 | `SkeletonReplayTest.kt` | drives the pipeline, computes metrics, gates on the baseline |
+| `TimeSkewReplayTest.kt` | what per-tracker clock skew costs, and how much `TimeAlignment` recovers |
 | `FixedStepClock.kt` | frame clock driven by the sequence's timestep, not the host |
 | `ReplayBaseline.kt` | loads/formats `test/resources/replay-baseline.txt` |
 | `dev.slimevr.metrics.PoseMetrics` | the metrics themselves (in `main`, so non-test code can use them) |
@@ -106,6 +107,71 @@ So those lines gate *"the corrections still work at all"* — any nonzero value 
 a regression. They cannot express *"slightly worse"*, because there is no
 headroom left. Graded measurement wants recordings with real sensor noise and
 drift, where the residual is not zero.
+
+## Measuring clock skew
+
+`TimeSkewReplayTest` uses the same machinery for a different question: not *did
+this change regress*, but *what is this correction worth*. Issue #2 asked for
+the number before the correction was written, on the grounds that a small number
+is also a result.
+
+Three runs per motion, differing only in *when* each tracker sampled it:
+
+| run | tracker *k* samples at | meaning |
+| --- | --- | --- |
+| `reference` | `t - maxDelay` | everyone equally late — input lag, no disagreement. The target. |
+| `skewed` | `t - delay(k)` | independent delays, server told nothing. The old behaviour. |
+| `aligned` | `t - delay(k)`, timestamped | same samples, `TimeAlignment` resolves them to a common tick. |
+
+The gap between `skewed` and `reference` is what skew costs. The gap between
+`aligned` and `reference` is what survives correcting it.
+
+The `timestamped` flag is a straight toggle between old and new behaviour rather
+than a test-only pipeline: with no sample history `TimeAlignment` finds no
+participants and touches nothing, which is exactly what happens on firmware that
+cannot report sample timestamps.
+
+With 1.3–14.9 ms of per-tracker delay — single-digit milliseconds of spread is
+the WiFi behaviour issue #2 describes — and the plain solver:
+
+| motion | metric | reference | skewed | aligned | recovered |
+| --- | --- | --- | --- | --- | --- |
+| `walk-in-place` | `foot_slide_m_per_sec` | 0.295661 | 0.303746 | 0.296161 | 93.8% |
+| `walk-in-place` | `foot_slide_total_m` | 1.561095 | 1.606827 | 1.563737 | 94.2% |
+| `squat` | `floor_clip_mean_m` | 0.148815 | 0.148930 | 0.148816 | 98.9% |
+| `squat` | `foot_height_disagreement_m` | 0.000000 | 0.000229 | 0.000001 | 99.7% |
+| `lean` | `foot_slide_total_m` | 1.212115 | 1.206900 | 1.212094 | 99.6% |
+
+So on this corpus the cost is **~2.7% of foot slide during fast leg motion**, and
+interpolation removes about 94% of it. That is a real effect and a modest one —
+worth knowing in both directions. Four things bound how far it generalises:
+
+- **The residual is not expected to be zero.** Slerp between two real samples is
+  not the true motion between them, so a sample interval's worth of
+  interpolation error survives by construction.
+- **`walk-in-place` is the sensitive case and it is the mild one.** 1 Hz leg
+  lifts are slow next to real fast motion, which is where issue #2 expects the
+  damage. This corpus cannot show that; recordings can.
+- **The `+legtweaks` columns are almost all zero**, for the same reason the
+  baseline's are — see below. They measure how much skew damage survives the
+  heuristics, not how much there was.
+- **The headset is excluded.** It is a position source with no rotation history,
+  so nothing can interpolate it, and in production its samples arrive over a
+  different transport carrying no tracker timestamp. Assertions are restricted
+  to motions with a static head height (`SyntheticMotion.staticHeadHeight`),
+  which removes that term rather than hiding it. It is a real limitation: an
+  un-timestamped headset leading the IMUs leaves a head-to-body offset alignment
+  cannot correct. `squat` is reported, not asserted, for exactly this reason.
+
+The first 20 frames are excluded from the metrics. Until a tracker's history
+brackets the reference, alignment clamps instead of interpolating; that
+transient is a genuine startup cost but it is not a property of the correction,
+and on the low-signal motions it is larger than the skew being measured.
+
+Two guards keep the measurement from passing by measuring nothing:
+`skewDegradesTheWalkPose` fails if the skew does not move foot slide at all, and
+`interpolationRecoversMostOfWhatSkewCosts` fails if no metric cleared the
+threshold to be judged.
 
 ## The metrics
 

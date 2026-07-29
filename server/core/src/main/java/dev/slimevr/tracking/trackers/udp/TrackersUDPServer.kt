@@ -478,13 +478,18 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 				// worse than arrival-stamping.
 				val trackerMicros =
 					connection.clockSync.unwrapTrackerMicros(packet.timestampMicros)
-				tracker.lastSampleServerMicros =
+				val sampleServerMicros =
 					connection.clockSync.toServerMicros(trackerMicros)
 
 				val rot29 = AXES_OFFSET * packet.rotation
 				when (packet.dataType) {
 					UDPPacket17RotationData.DATA_TYPE_NORMAL -> {
-						tracker.setRotation(rot29)
+						// Recording the instant alongside the rotation is what
+						// admits this tracker to TimeAlignment. A plain
+						// setRotation would leave it fused by arrival order,
+						// like any tracker on firmware that cannot say when it
+						// took the sample.
+						tracker.setTimestampedRotation(rot29, sampleServerMicros)
 						tracker.dataTick()
 					}
 

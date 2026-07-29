@@ -118,11 +118,18 @@ class Tracker @JvmOverloads constructor(
 	 * sample was taken, or 0 if the tracker does not report one.
 	 *
 	 * Derived from the tracker's own clock via its ClockSync estimate, so it is
-	 * directly comparable between trackers. This is what a future interpolation
-	 * step needs in order to bring every tracker onto a common tick before the
-	 * skeleton is solved; nothing consumes it yet.
+	 * directly comparable between trackers. [TimeAlignment] uses it to bring
+	 * every tracker onto a common tick before the skeleton is solved.
 	 */
 	var lastSampleServerMicros: Long = 0
+
+	/**
+	 * Recent timestamped raw rotations, for [TimeAlignment].
+	 *
+	 * Empty unless the tracker reports sample timestamps, which is what makes
+	 * alignment inert on firmware that does not.
+	 */
+	val sampleHistory = TrackerSampleHistory()
 
 	private val timer = BufferedTimer(1f)
 	private var timeAtLastUpdate: Long = System.currentTimeMillis()
@@ -482,6 +489,53 @@ class Tracker @JvmOverloads constructor(
 	 */
 	fun setRotation(rotation: Quaternion) {
 		this._rotation = rotation
+	}
+
+	/**
+	 * Sets the raw rotation along with the instant it was measured, in the
+	 * server's timebase.
+	 *
+	 * Only trackers whose firmware reports sample timestamps reach this, and
+	 * only they take part in [TimeAlignment]. Everything else keeps going
+	 * through [setRotation], where the sample's instant is unknown and the
+	 * server has no choice but to treat it as "now".
+	 */
+	fun setTimestampedRotation(rotation: Quaternion, sampleServerMicros: Long) {
+		lastSampleServerMicros = sampleServerMicros
+		sampleHistory.record(sampleServerMicros, rotation)
+		this._rotation = rotation
+	}
+
+	/**
+	 * Replaces the raw rotation with this tracker's rotation at
+	 * [referenceServerMicros], interpolated from [sampleHistory].
+	 *
+	 * Called by [TimeAlignment] once per solve, before anything reads the
+	 * rotation. Overwriting `_rotation` rather than shadowing it is deliberate:
+	 * the history is the durable record of what the tracker reported, so there
+	 * is nothing to lose, and it means every existing consumer -- the skeleton,
+	 * the resets handler, the GUI -- sees the time-aligned value without
+	 * knowing this mechanism exists.
+	 *
+	 * The filtering handler is re-fed for the same reason. Its output is what
+	 * [getRotationNoResetSmooth] returns when smoothing or prediction is on,
+	 * so without this the aligned rotation would be computed and then quietly
+	 * discarded in the default configuration. Note this feeds the moving
+	 * average once per solve in addition to once per packet; under
+	 * [dev.slimevr.filtering.TrackerFilters.PREDICTION] that halves the span
+	 * its delta buffer covers, and so weakens prediction slightly. That is an
+	 * acceptable trade against prediction partly compensating for skew that is
+	 * now corrected directly.
+	 *
+	 * @return true if a rotation was available, false if there was no history.
+	 */
+	fun applyTimeAlignment(referenceServerMicros: Long): Boolean {
+		val aligned = sampleHistory.rotationAt(referenceServerMicros) ?: return false
+		this._rotation = aligned
+		if (trackRotDirection) {
+			filteringHandler.dataTick(getAdjustedRotation())
+		}
+		return true
 	}
 
 	/**
