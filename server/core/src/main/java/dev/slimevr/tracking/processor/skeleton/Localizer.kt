@@ -35,7 +35,11 @@ class Localizer(humanSkeleton: HumanSkeleton) {
 	private val skeleton: HumanSkeleton = humanSkeleton
 	private val legTweaks: LegTweaks = skeleton.legTweaks
 	private var bufCur: LegTweaksBuffer = legTweaks.bufferHead
-	private var bufPrev: LegTweaksBuffer = LegTweaksBuffer()
+
+	// Placeholder until update() replaces it with bufCur.parent; built on the
+	// same clock as the rest of the chain so it cannot introduce a cross-clock
+	// interval if it is ever differenced.
+	private var bufPrev: LegTweaksBuffer = LegTweaksBuffer(legTweaks.clock)
 
 	// state variables
 	private var enabled: Boolean = false

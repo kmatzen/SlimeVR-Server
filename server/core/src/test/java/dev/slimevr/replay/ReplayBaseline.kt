@@ -44,6 +44,10 @@ object ReplayBaseline {
 		sb.append("# Tolerances should come from measured run-to-run spread.\n")
 		sb.append("# Replay is deterministic for these metrics, so the spread is\n")
 		sb.append("# zero and a tight absolute tolerance is legitimate.\n")
+		sb.append("#\n")
+		sb.append("# NOTE: the committed file carries further commentary explaining\n")
+		sb.append("# what these numbers mean and why several are zero. Copy the\n")
+		sb.append("# values below into it rather than replacing it wholesale.\n")
 		for ((key, value) in values) {
 			sb.append("%-44s %12.6f %12.6f\n".format(key, value, defaultTolerance(value)))
 		}
