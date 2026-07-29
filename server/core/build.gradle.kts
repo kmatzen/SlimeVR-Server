@@ -104,4 +104,12 @@ dependencies {
 
 tasks.test {
 	useJUnitPlatform()
+
+	// Forward the replay-baseline regeneration flag to the test JVM. Without
+	// this, `-Dreplay.writeBaseline=true` reaches Gradle and stops there, so the
+	// workflow documented on ReplayBaseline silently does nothing.
+	System.getProperty("replay.writeBaseline")?.let {
+		systemProperty("replay.writeBaseline", it)
+		outputs.upToDateWhen { false }
+	}
 }

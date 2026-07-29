@@ -124,6 +124,22 @@ class LegTweaks(private val skeleton: HumanSkeleton) {
 		private set
 	private var bufferInvalid = true
 
+	/**
+	 * Time source for the frame buffer. Defaults to the system clock; replay
+	 * substitutes a fixed-step clock so the corrections are reproducible.
+	 *
+	 * Assigning discards the buffer: frames stamped by the old clock cannot be
+	 * differenced against frames stamped by the new one, and silently mixing the
+	 * two would produce a garbage velocity for exactly one frame -- the kind of
+	 * defect that shows up as an unexplained baseline movement much later.
+	 */
+	var clock: FrameClock = FrameClock.SYSTEM
+		set(value) {
+			field = value
+			bufferHead = LegTweaksBuffer(value)
+			bufferInvalid = true
+		}
+
 	constructor(skeleton: HumanSkeleton, config: LegTweaksConfig) : this(skeleton) {
 		this.config = config
 		updateConfig()
@@ -137,7 +153,7 @@ class LegTweaks(private val skeleton: HumanSkeleton) {
 		this.floorClipEnabled = floorClipEnabled
 
 		// reset the buffer
-		bufferHead = LegTweaksBuffer()
+		bufferHead = LegTweaksBuffer(clock)
 		bufferInvalid = true
 	}
 
@@ -145,7 +161,7 @@ class LegTweaks(private val skeleton: HumanSkeleton) {
 		this.skatingCorrectionEnabled = skatingCorrectionEnabled
 
 		// reset the buffer
-		bufferHead = LegTweaksBuffer()
+		bufferHead = LegTweaksBuffer(clock)
 		bufferInvalid = true
 	}
 

@@ -1,17 +1,34 @@
 # skeleton replay baseline
 # key  value  tolerance
 #
-# Covers only the deterministic configuration (leg corrections disabled).
-# Replay of that path is bit-reproducible, so tolerances are tight on purpose
-# -- they are set from measured spread, and the measured spread is zero.
+# Covers both configurations: the plain solver, and the solver with the leg
+# corrections engaged (the `+legtweaks` keys). Replay of both is now
+# bit-reproducible -- LegTweaksBuffer takes its frame times from an injected
+# FrameClock rather than System.nanoTime() -- so the measured run-to-run spread
+# is zero and tight tolerances are legitimate.
 #
-# The skating-correction path is NOT covered here: LegTweaksBuffer stamps
-# frames with System.nanoTime(), so identical input can produce different
-# output run to run. See clockDependentStagesAreOnlyApproximatelyReproducible.
-# Those metrics can join this file once an injectable clock lands.
+# On why so many `+legtweaks` values are zero: the corrections fully eliminate
+# the artifacts these metrics measure on clean synthetic input. That was
+# verified rather than assumed. For `squat`, the left ankle goes from a minimum
+# of -0.2339 m (clipping through the floor on every one of 400 frames) to a
+# minimum of ~0 and a maximum of 0.0129 m, still planted on all 400 frames,
+# while horizontal travel during planted frames falls from 0.2012 m to 0. For
+# `walk-in-place`, planted frames and ankle heights are unchanged -- there is no
+# clipping to fix -- while horizontal travel during planted frames falls from
+# 0.8835 m to 0. The feet are being locked, not lifted out of the measured
+# region.
+#
+# The consequence is worth knowing when reading a diff here: these zero lines
+# gate "the corrections still work at all", and any nonzero value is a
+# regression. They cannot express "slightly worse", because there is no headroom
+# left on synthetic input. Graded measurement needs recordings with real sensor
+# noise and drift, where the residual is not zero -- see issue #15.
 #
 # Regenerating this file is how a real regression gets blessed as expected
 # behaviour. Read the diff first.
+#
+#   ./gradlew :server:core:test --tests 'dev.slimevr.replay.SkeletonReplayTest' \
+#       -Dreplay.writeBaseline=true
 
 stand/foot_slide_m_per_sec                       0.000000     0.000100
 stand/foot_slide_total_m                         0.000000     0.000100
@@ -19,25 +36,53 @@ stand/floor_clip_mean_m                          0.000000     0.000100
 stand/floor_clip_max_m                           0.000000     0.000100
 stand/floor_clip_fraction                        0.000000     0.000100
 stand/foot_height_disagreement_m                 0.000000     0.000100
-stand/height_m                                   1.580000     0.031700
-squat/foot_slide_m_per_sec                       0.050289     0.001106
-squat/foot_slide_total_m                         0.402317     0.008146
-squat/floor_clip_mean_m                          0.141896     0.002938
-squat/floor_clip_max_m                           0.233865     0.004777
-squat/floor_clip_fraction                        0.997500     0.020050
+stand/height_m                                   1.580000     0.031600
+stand+legtweaks/foot_slide_m_per_sec             0.000000     0.000100
+stand+legtweaks/foot_slide_total_m               0.000000     0.000100
+stand+legtweaks/floor_clip_mean_m                0.000000     0.000100
+stand+legtweaks/floor_clip_max_m                 0.000000     0.000100
+stand+legtweaks/floor_clip_fraction              0.000000     0.000100
+stand+legtweaks/foot_height_disagreement_m       0.000000     0.000100
+stand+legtweaks/height_m                         1.580000     0.031600
+squat/foot_slide_m_per_sec                       0.050289     0.001006
+squat/foot_slide_total_m                         0.402317     0.008046
+squat/floor_clip_mean_m                          0.141896     0.002838
+squat/floor_clip_max_m                           0.233865     0.004677
+squat/floor_clip_fraction                        0.997500     0.019950
 squat/foot_height_disagreement_m                 0.000000     0.000100
-squat/height_m                                   1.580000     0.031700
-walk-in-place/foot_slide_m_per_sec               0.308897     0.006278
-walk-in-place/foot_slide_total_m                 1.754549     0.035191
+squat/height_m                                   1.580000     0.031600
+squat+legtweaks/foot_slide_m_per_sec             0.000000     0.000100
+squat+legtweaks/foot_slide_total_m               0.000000     0.000100
+squat+legtweaks/floor_clip_mean_m                0.000000     0.000100
+squat+legtweaks/floor_clip_max_m                 0.000000     0.000100
+squat+legtweaks/floor_clip_fraction              0.000000     0.000100
+squat+legtweaks/foot_height_disagreement_m       0.000000     0.000100
+squat+legtweaks/height_m                         1.580000     0.031600
+walk-in-place/foot_slide_m_per_sec               0.308897     0.006178
+walk-in-place/foot_slide_total_m                 1.754549     0.035091
 walk-in-place/floor_clip_mean_m                  0.000000     0.000100
 walk-in-place/floor_clip_max_m                   0.000000     0.000100
 walk-in-place/floor_clip_fraction                0.000000     0.000100
-walk-in-place/foot_height_disagreement_m         0.019261     0.000485
-walk-in-place/height_m                           1.580000     0.031700
-lean/foot_slide_m_per_sec                        0.164599     0.003392
-lean/foot_slide_total_m                          1.316805     0.026436
+walk-in-place/foot_height_disagreement_m         0.019261     0.000385
+walk-in-place/height_m                           1.580000     0.031600
+walk-in-place+legtweaks/foot_slide_m_per_sec     0.000000     0.000100
+walk-in-place+legtweaks/foot_slide_total_m       0.000000     0.000100
+walk-in-place+legtweaks/floor_clip_mean_m        0.000000     0.000100
+walk-in-place+legtweaks/floor_clip_max_m         0.000000     0.000100
+walk-in-place+legtweaks/floor_clip_fraction      0.000000     0.000100
+walk-in-place+legtweaks/foot_height_disagreement_m     0.019284     0.000386
+walk-in-place+legtweaks/height_m                 1.580000     0.031600
+lean/foot_slide_m_per_sec                        0.164599     0.003292
+lean/foot_slide_total_m                          1.316805     0.026336
 lean/floor_clip_mean_m                           0.000000     0.000100
 lean/floor_clip_max_m                            0.000000     0.000100
 lean/floor_clip_fraction                         0.000000     0.000100
 lean/foot_height_disagreement_m                  0.000000     0.000100
-lean/height_m                                    1.580000     0.031700
+lean/height_m                                    1.580000     0.031600
+lean+legtweaks/foot_slide_m_per_sec              0.000000     0.000100
+lean+legtweaks/foot_slide_total_m                0.000000     0.000100
+lean+legtweaks/floor_clip_mean_m                 0.000000     0.000100
+lean+legtweaks/floor_clip_max_m                  0.000000     0.000100
+lean+legtweaks/floor_clip_fraction               0.000000     0.000100
+lean+legtweaks/foot_height_disagreement_m        0.000000     0.000100
+lean+legtweaks/height_m                          1.580000     0.031600

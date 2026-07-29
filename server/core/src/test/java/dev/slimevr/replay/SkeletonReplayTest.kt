@@ -24,6 +24,13 @@ import kotlin.test.assertTrue
  * baselines. This is the piece that lets a change to the solver or to
  * `LegTweaks` be argued about with numbers instead of impressions.
  *
+ * Both configurations are covered: the plain solver, and the solver with the
+ * leg corrections engaged. The latter used to be reportable but not gateable,
+ * because `LegTweaksBuffer` stamped every frame with `System.nanoTime()` and so
+ * derived velocities from real elapsed time. It now takes its time from an
+ * injected [dev.slimevr.tracking.processor.skeleton.FrameClock], which replay
+ * drives from the sequence's own timestep -- see [FixedStepClock].
+ *
  * See [ReplayBaseline] for the baseline file and how to regenerate it.
  */
 class SkeletonReplayTest {
@@ -32,16 +39,19 @@ class SkeletonReplayTest {
 	private val frames = 400
 
 	/**
+	 * The configurations each baselined motion is replayed under.
+	 *
+	 * The suffix is part of the baseline key, so the two configurations produce
+	 * separate, individually attributable lines in `replay-baseline.txt`.
+	 */
+	private val configurations = listOf(
+		"" to false,
+		"+legtweaks" to true,
+	)
+
+	/**
 	 * The core property a regression suite depends on: the same input must
 	 * produce the same output. If this fails, every baseline below is noise.
-	 *
-	 * It currently passes only because the default toggles leave the
-	 * wall-clock-dependent stages off. `LegTweaksBuffer.kt:180` stamps every
-	 * frame with `System.nanoTime()` and `HumanPoseManager.kt:513` reads
-	 * `System.currentTimeMillis()`, so those stages compute velocities from
-	 * *real* elapsed time and cannot be replayed reproducibly. Extending the
-	 * suite to cover them needs an injectable clock -- see
-	 * [replayIsNotYetDeterministicWithLegTweaks].
 	 */
 	@Test
 	fun replayIsDeterministic() {
@@ -57,28 +67,24 @@ class SkeletonReplayTest {
 	}
 
 	/**
-	 * Quantifies the wall-clock dependence of the leg-correction stages.
+	 * The same property for the leg corrections, which is the case that used to
+	 * fail.
 	 *
-	 * `LegTweaksBuffer.kt:180` stamps every frame with `System.nanoTime()` and
-	 * `HumanPoseManager.kt:513` reads `System.currentTimeMillis()`, so the
-	 * skating correction derives velocities from *real* elapsed time rather
-	 * than from the frame's simulated timestep. Two replays of byte-identical
-	 * input therefore need not agree, and in practice they do not: measured
-	 * drift is on the order of 1e-4 m/s of foot slide, roughly 0.3% of the
-	 * signal.
+	 * `LegTweaksBuffer` derives foot velocities from the interval between
+	 * consecutive frames. While that interval came from `System.nanoTime()`, two
+	 * replays of byte-identical input did not agree -- measured drift was on the
+	 * order of 1e-4 m/s of foot slide on the machine that first recorded it, and
+	 * a few times 1e-6 on others. The magnitude was never the point; it was set
+	 * by machine speed and load rather than by anything about the code under
+	 * test, which put a floor under how tight any baseline on these metrics
+	 * could be.
 	 *
-	 * Small, but not zero, and that is the whole problem -- it puts a floor
-	 * under how tight any baseline on these metrics can be, and the floor is
-	 * set by machine speed and load rather than by anything about the code
-	 * under test. This is why [metricsMatchBaseline] covers only the
-	 * deterministic configuration.
-	 *
-	 * The bound asserted here is a guard against the nondeterminism getting
-	 * worse. When an injectable clock lands it should become an equality
-	 * assertion and the skating-correction metrics should join the baseline.
+	 * With the clock injected, the interval is the sequence's timestep and the
+	 * spread is exactly zero, so this is an equality assertion and the corrected
+	 * metrics are in the committed baseline alongside the uncorrected ones.
 	 */
 	@Test
-	fun clockDependentStagesAreOnlyApproximatelyReproducible() {
+	fun replayIsDeterministicWithLegTweaks() {
 		val a = replay("squat", enableSkatingCorrection = true)
 		val b = replay("squat", enableSkatingCorrection = true)
 
@@ -87,13 +93,14 @@ class SkeletonReplayTest {
 		val drift = aMap.keys.associateWith { key ->
 			abs((aMap[key] ?: 0f) - (bMap[key] ?: 0f))
 		}
-		println("skating-correction replay drift between identical runs: $drift")
 
-		val worst = drift.values.maxOrNull() ?: 0f
-		assertTrue(
-			worst < 0.01f,
-			"replay nondeterminism has grown to $worst; the clock dependence in " +
-				"LegTweaksBuffer is now large enough to matter. Drift: $drift",
+		assertEquals(
+			aMap,
+			bMap,
+			"replay with the leg corrections engaged is not reproducible. This is " +
+				"what the injected FrameClock exists to prevent -- check that " +
+				"nothing in the corrected path has gone back to reading the " +
+				"system clock. Drift: $drift",
 		)
 	}
 
@@ -121,40 +128,76 @@ class SkeletonReplayTest {
 		)
 	}
 
+	/**
+	 * A frame that is not separated in time from its parent carries no velocity
+	 * information. `getTimeDelta()` returns 1/dt, so a zero interval would put an
+	 * infinity into every threshold comparison in `LegTweaksBuffer` and force the
+	 * feet permanently unlocked.
+	 *
+	 * `System.nanoTime()` made that all but unreachable; an injected clock makes
+	 * it reachable, so it is handled rather than assumed away. This pins the
+	 * handling.
+	 */
+	@Test
+	fun aStalledClockDoesNotProduceInfiniteVelocities() {
+		val stalled = FixedStepClock(0L)
+		val metrics = replay("squat", enableSkatingCorrection = true, clock = stalled)
+
+		for ((name, value) in metrics.toMap()) {
+			assertTrue(
+				value.isFinite(),
+				"metric '$name' is $value with a stalled clock; a zero frame " +
+					"interval has leaked an infinity into the corrections",
+			)
+		}
+	}
+
 	@Test
 	fun metricsMatchBaseline() {
 		val baseline = ReplayBaseline.load()
 		val failures = mutableListOf<String>()
 		val report = StringBuilder()
+		val measured = linkedMapOf<String, Float>()
 
 		for (motion in SyntheticMotion.names) {
-			val metrics = replay(motion)
-			for ((metric, value) in metrics.toMap()) {
-				val key = "$motion/$metric"
-				val entry = baseline[key]
-				if (entry == null) {
-					report.append("%-44s %12s %12.6f  (new)\n".format(key, "-", value))
-					continue
-				}
-				val delta = value - entry.value
-				val bad = abs(delta) > entry.tolerance
-				report.append(
-					"%-44s %12.6f %12.6f %12.6f %s\n".format(
-						key,
-						entry.value,
-						value,
-						delta,
-						if (bad) "REGRESSION" else "",
-					),
-				)
-				if (bad) {
-					failures.add("$key: baseline ${entry.value}, got $value (tolerance ${entry.tolerance})")
+			for ((suffix, legTweaks) in configurations) {
+				val metrics = replay(motion, enableSkatingCorrection = legTweaks)
+				for ((metric, value) in metrics.toMap()) {
+					val key = "$motion$suffix/$metric"
+					measured[key] = value
+					val entry = baseline[key]
+					if (entry == null) {
+						report.append("%-44s %12s %12.6f  (new)\n".format(key, "-", value))
+						continue
+					}
+					val delta = value - entry.value
+					val bad = abs(delta) > entry.tolerance
+					report.append(
+						"%-44s %12.6f %12.6f %12.6f %s\n".format(
+							key,
+							entry.value,
+							value,
+							delta,
+							if (bad) "REGRESSION" else "",
+						),
+					)
+					if (bad) {
+						failures.add("$key: baseline ${entry.value}, got $value (tolerance ${entry.tolerance})")
+					}
 				}
 			}
 		}
 
 		println("%-44s %12s %12s %12s".format("metric", "baseline", "current", "delta"))
 		println(report)
+
+		// Documented in ReplayBaseline: run with -Dreplay.writeBaseline=true and
+		// copy the emitted block over the resource file.
+		if (System.getProperty("replay.writeBaseline") == "true") {
+			println("--- BEGIN replay-baseline.txt ---")
+			println(ReplayBaseline.format(measured))
+			println("--- END replay-baseline.txt ---")
+		}
 
 		assertAll(failures.map { { throw AssertionError(it) } })
 	}
@@ -200,6 +243,7 @@ class SkeletonReplayTest {
 	private fun replay(
 		motion: String,
 		enableSkatingCorrection: Boolean = false,
+		clock: FixedStepClock = FixedStepClock(1f / rateHz),
 	): PoseMetrics {
 		val hmd = mkTracker(0, TrackerPosition.HEAD, isHmd = true)
 		val chest = mkTracker(1, TrackerPosition.CHEST)
@@ -222,10 +266,19 @@ class SkeletonReplayTest {
 		hpm.setToggle(SkeletonConfigToggles.SKATING_CORRECTION, enableSkatingCorrection)
 		hpm.setToggle(SkeletonConfigToggles.FLOOR_CLIP, enableSkatingCorrection)
 
+		// After the toggles: each of them resets the frame buffer, and so does
+		// assigning the clock. Installing it last guarantees no frame stamped by
+		// the system clock survives into the replay.
+		hpm.skeleton.legTweaks.clock = clock.clock
+
 		val accumulator = PoseMetricsAccumulator()
 		val dt = 1f / rateHz
 
 		for (frame in SyntheticMotion.sequence(motion, frames, rateHz)) {
+			// Advance before the update so that the frame this update produces is
+			// exactly one timestep after the previous one.
+			clock.advance()
+
 			hmd.position = Vector3(0f, height * frame.headHeightFraction, 0f)
 			hmd.setRotation(Quaternion.IDENTITY)
 			chest.setRotation(frame.chest)

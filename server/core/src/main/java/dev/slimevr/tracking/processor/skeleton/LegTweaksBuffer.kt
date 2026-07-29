@@ -20,7 +20,15 @@ import kotlin.math.*
  * large range of actions and body types.
  */
 
-class LegTweaksBuffer @Suppress("ktlint") constructor() {
+class LegTweaksBuffer @Suppress("ktlint") constructor(
+	/**
+	 * Where [timeOfFrame] comes from. Defaults to the system clock, so live
+	 * behaviour is unchanged; replay supplies a fixed-step clock so that
+	 * velocities derive from the sequence's timestep rather than from how fast
+	 * the host ran. See [FrameClock].
+	 */
+	private val clock: FrameClock = FrameClock.SYSTEM,
+) {
 	// hyperparameters / constants
 	companion object {
 		const val STATE_UNKNOWN = 0
@@ -177,7 +185,7 @@ class LegTweaksBuffer @Suppress("ktlint") constructor() {
 		private set
 
 	// other data
-	val timeOfFrame: Long = System.nanoTime()
+	val timeOfFrame: Long = clock.nanos()
 	var parent: LegTweaksBuffer? = null
 		private set
 
@@ -211,7 +219,10 @@ class LegTweaksBuffer @Suppress("ktlint") constructor() {
 		centerOfMass: Vector3,
 		parent: LegTweaksBuffer,
 		active: Boolean,
-	) : this() {
+		// Inherit the parent's clock rather than defaulting: a frame must be
+		// stamped by the same source as the frame it is differenced against, or
+		// getTimeDelta() is comparing two unrelated timelines.
+	) : this(parent.clock) {
 		this.leftFootPosition = leftFootPosition
 		this.rightFootPosition = rightFootPosition
 		this.leftKneePosition = leftKneePosition
@@ -264,7 +275,17 @@ class LegTweaksBuffer @Suppress("ktlint") constructor() {
 	}
 
 	// returns 1 / delta time
-	fun getTimeDelta(): Float = if (parent == null) 0.0f else 1.0f / ((timeOfFrame - parent!!.timeOfFrame) / NS_CONVERT)
+	fun getTimeDelta(): Float {
+		val prev = parent ?: return 0.0f
+		// A frame not separated in time from its parent carries no velocity
+		// information, and 1/0 would put an infinity into every threshold
+		// comparison below. Treat it as the no-parent case. System.nanoTime()
+		// made this all but unreachable; an injected fixed-step clock makes it
+		// reachable, so it is now handled rather than assumed away.
+		val elapsed = timeOfFrame - prev.timeOfFrame
+		if (elapsed <= 0L) return 0.0f
+		return 1.0f / (elapsed / NS_CONVERT)
+	}
 
 	// calculate movement attributes
 	private fun calculateFootAttributes(active: Boolean) {

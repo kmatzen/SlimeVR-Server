@@ -17,8 +17,10 @@ argued about with numbers instead of impressions.
 | --- | --- |
 | `SyntheticMotion.kt` | deterministic tracker motion — `stand`, `squat`, `walk-in-place`, `lean` |
 | `SkeletonReplayTest.kt` | drives the pipeline, computes metrics, gates on the baseline |
+| `FixedStepClock.kt` | frame clock driven by the sequence's timestep, not the host |
 | `ReplayBaseline.kt` | loads/formats `test/resources/replay-baseline.txt` |
 | `dev.slimevr.metrics.PoseMetrics` | the metrics themselves (in `main`, so non-test code can use them) |
+| `dev.slimevr.tracking.processor.skeleton.FrameClock` | the injection point, in `main` |
 
 ## Why synthetic motion
 
@@ -56,26 +58,54 @@ SteamVR actually receives.
 mistake: it fails if toggling the correction changes no metric, on the grounds
 that a test exercising a disabled code path is worse than no test.
 
-## The determinism caveat
+## Determinism, and the injected clock
 
-`metricsMatchBaseline` covers only the configuration with leg corrections
-**disabled**. That path is bit-reproducible, so its tolerances are tight.
+`metricsMatchBaseline` covers **both** configurations: the plain solver, and the
+solver with the leg corrections engaged (the `+legtweaks` baseline keys). Both
+are bit-reproducible, so tolerances are tight throughout.
 
-The leg corrections are not reproducible. `LegTweaksBuffer.kt:180` stamps every
-frame with `System.nanoTime()` and `HumanPoseManager.kt:513` reads
-`System.currentTimeMillis()`, so velocities are derived from real elapsed time
-rather than the frame's simulated timestep. Two replays of byte-identical input
-disagree by roughly 1e-4 m/s of foot slide — about 0.3% of the signal.
+That was not always true. `LegTweaksBuffer` derives foot velocities from the
+interval between consecutive frames, and it used to read that interval from
+`System.nanoTime()` — so velocities came from real elapsed time rather than the
+sequence's timestep, and two replays of byte-identical input did not agree.
+Measured drift was around 1e-4 m/s of foot slide on the machine that first
+recorded it and a few times 1e-6 on others; the magnitude was never the point,
+since it was set by machine speed and load rather than by the code under test.
 
-Small, but not zero, and that is the whole problem: it puts a floor under how
-tight any baseline on those metrics can be, and that floor is set by machine
-speed and load rather than by the code under test.
+The buffer now takes its timestamps from a `FrameClock`. Production keeps
+`FrameClock.SYSTEM` and behaves exactly as before. Replay installs a
+`FixedStepClock` advanced once per frame by the sequence's own timestep, so the
+interval is whatever the sequence says it is and the run-to-run spread is
+exactly zero. `replayIsDeterministicWithLegTweaks` asserts equality, not a
+bound.
 
-`clockDependentStagesAreOnlyApproximatelyReproducible` measures this and asserts
-a loose bound, as a guard against it getting worse. **An injectable clock is the
-prerequisite for extending baseline coverage to the leg corrections** — once it
-lands, that test becomes an equality assertion and those metrics join the
-baseline file.
+Two consequences worth knowing:
+
+- **Install the clock last.** Each of the `SkeletonConfigToggles` setters resets
+  the frame buffer, and so does assigning `legTweaks.clock`. Assigning it after
+  the toggles guarantees no frame stamped by the system clock survives into the
+  replay. Mixing stamps from two clocks produces one garbage velocity frame,
+  which is exactly the kind of thing that shows up as an unexplained baseline
+  movement months later.
+- **A stalled clock is now reachable.** `getTimeDelta()` returns 1/dt, so a zero
+  interval would put an infinity into every threshold comparison in the buffer.
+  `System.nanoTime()` made that all but impossible; an injected clock does not,
+  so a zero interval is treated as the no-parent case and returns 0.
+  `aStalledClockDoesNotProduceInfiniteVelocities` pins that.
+
+### Why most `+legtweaks` numbers are zero
+
+Because the corrections fully eliminate the artifacts these metrics measure on
+clean synthetic input — verified, not assumed. On `squat` the left ankle goes
+from a minimum of -0.2339 m (clipping on all 400 frames) to a minimum of ~0 and
+a maximum of 0.0129 m, still planted on all 400 frames, with horizontal travel
+while planted falling from 0.2012 m to 0. The feet are being locked, not lifted
+out of the measured region.
+
+So those lines gate *"the corrections still work at all"* — any nonzero value is
+a regression. They cannot express *"slightly worse"*, because there is no
+headroom left. Graded measurement wants recordings with real sensor noise and
+drift, where the residual is not zero.
 
 ## The metrics
 
@@ -100,15 +130,21 @@ with no optimiser attached.
 
 ## Regenerating the baseline
 
-Run the suite, take the printed `current` column, and write it into
-`test/resources/replay-baseline.txt`.
+```sh
+./gradlew :server:core:test --tests 'dev.slimevr.replay.SkeletonReplayTest' \
+    -Dreplay.writeBaseline=true
+```
+
+That emits a formatted block between `--- BEGIN replay-baseline.txt ---` and
+`--- END ---`. Copy the *values* into `test/resources/replay-baseline.txt`,
+keeping the explanatory comments already in that file.
 
 **Read the diff before committing it.** Regenerating a baseline is how a real
 regression gets blessed as expected behaviour, and it is the single most likely
 way for this suite to stop being useful.
 
-Tolerances should come from measured run-to-run spread, not from taste. For the
-deterministic path the spread is genuinely zero, so the committed tolerances are
-tight (2% with a 1e-4 absolute floor — the floor exists because several metrics
-are legitimately zero, and 2% of zero is zero, which would be infinitely
-strict).
+Tolerances should come from measured run-to-run spread, not from taste. With the
+clock injected the spread is genuinely zero on every covered configuration, so
+the committed tolerances are tight throughout (2% with a 1e-4 absolute floor —
+the floor exists because several metrics are legitimately zero, and 2% of zero
+is zero, which would be infinitely strict).
