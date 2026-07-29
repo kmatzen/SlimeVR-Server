@@ -49,19 +49,43 @@ object SyntheticMotion {
 	fun sequence(name: String, frames: Int, rateHz: Float): List<Frame> {
 		require(frames > 0) { "frames must be positive" }
 		require(rateHz > 0f) { "rateHz must be positive" }
-		require(name in names) { "unknown motion '$name' (known: $names)" }
 
-		return (0 until frames).map { i ->
-			val t = i / rateHz
-			when (name) {
-				"stand" -> stand()
-				"squat" -> squat(t)
-				"walk-in-place" -> walkInPlace(t)
-				"lean" -> lean(t)
-				else -> stand()
-			}
+		return (0 until frames).map { i -> at(name, i / rateHz) }
+	}
+
+	/**
+	 * The motion at an arbitrary instant, not just on a frame boundary.
+	 *
+	 * These sequences are closed-form functions of time, so there is no reason
+	 * to restrict sampling to a grid -- and [dev.slimevr.replay.TimeSkewReplayTest]
+	 * needs off-grid samples specifically. Simulating clock skew means each
+	 * tracker sampling the *same* motion at its *own* instant, and if those
+	 * instants land on frame boundaries the interpolation under test is never
+	 * exercised: every lookup would be an exact hit.
+	 *
+	 * [tSec] may be negative, which is what a tracker whose samples are delayed
+	 * reports during the first few frames.
+	 */
+	fun at(name: String, tSec: Float): Frame {
+		require(name in names) { "unknown motion '$name' (known: $names)" }
+		return when (name) {
+			"stand" -> stand()
+			"squat" -> squat(tSec)
+			"walk-in-place" -> walkInPlace(tSec)
+			"lean" -> lean(tSec)
+			else -> stand()
 		}
 	}
+
+	/**
+	 * Motions whose headset height does not vary with time.
+	 *
+	 * The headset is a position source with no rotation history, so time
+	 * alignment cannot interpolate it -- see [dev.slimevr.replay.TimeSkewReplayTest].
+	 * On these sequences that limitation is invisible, because there is nothing
+	 * about the head to get wrong.
+	 */
+	val staticHeadHeight = listOf("stand", "walk-in-place", "lean")
 
 	private fun stand() = Frame(
 		chest = Quaternion.IDENTITY,

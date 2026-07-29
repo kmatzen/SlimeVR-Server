@@ -12,6 +12,7 @@ import dev.slimevr.tracking.processor.config.SkeletonConfigToggles
 import dev.slimevr.tracking.processor.config.SkeletonConfigValues
 import dev.slimevr.tracking.processor.stayaligned.StayAligned
 import dev.slimevr.tracking.processor.stayaligned.trackers.TrackerSkeleton
+import dev.slimevr.tracking.trackers.TimeAlignment
 import dev.slimevr.tracking.trackers.Tracker
 import dev.slimevr.tracking.trackers.TrackerPosition
 import dev.slimevr.tracking.trackers.TrackerRole
@@ -220,6 +221,14 @@ class HumanSkeleton(
 	// Stay Aligned
 	var trackerSkeleton = TrackerSkeleton(this)
 	var stayAlignedConfig = StayAlignedConfig()
+
+	/**
+	 * Resolves the input trackers to a common instant before each solve.
+	 *
+	 * Inert unless at least two trackers report sample timestamps, so this is
+	 * a no-op on firmware that does not support them.
+	 */
+	val timeAlignment = TimeAlignment()
 
 	// Constructors
 	init {
@@ -542,6 +551,11 @@ class HumanSkeleton(
 	fun updatePose() {
 		tapDetectionManager?.update()
 		userHeightCalibration?.tick()
+
+		// First, before anything reads a rotation: every stage below is
+		// entitled to assume the trackers are describing the same instant, and
+		// this is the only place that can make that true.
+		timeAlignment.align(trackerSkeleton.allTrackers)
 
 		StayAligned.adjustNextTracker(trackerSkeleton, stayAlignedConfig)
 

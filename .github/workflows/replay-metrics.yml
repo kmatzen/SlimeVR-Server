@@ -57,6 +57,17 @@ jobs:
               || echo 'no metrics table found'
             echo '```'
             echo
+            echo '## Clock-skew recovery'
+            echo
+            echo 'What per-tracker time skew costs, and how much of it'
+            echo '`TimeAlignment` recovers. `reference` is the same motion with'
+            echo 'every tracker equally delayed -- the pose alignment is trying'
+            echo 'to reach.'
+            echo
+            echo '```'
+            grep -E '^\s*SKEW ' replay-output.txt || echo 'no skew table found'
+            echo '```'
+            echo
             echo '<details><summary>Replay determinism</summary>'
             echo
             echo '```'
