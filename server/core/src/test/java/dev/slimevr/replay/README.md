@@ -18,25 +18,84 @@ argued about with numbers instead of impressions.
 | `SyntheticMotion.kt` | deterministic tracker motion — `stand`, `squat`, `walk-in-place`, `lean` |
 | `SkeletonReplayTest.kt` | drives the pipeline, computes metrics, gates on the baseline |
 | `TimeSkewReplayTest.kt` | what per-tracker clock skew costs, and how much `TimeAlignment` recovers |
+| `CorpusRecording.kt` | discovers committed `.pfr` recordings and validates their capture metadata |
+| `CorpusReplay.kt` | drives a recording through the pipeline into the same metrics |
+| `CorpusReplayTest.kt` | gates the corpus on the baseline, and proves the `.pfr` path end to end |
+| `CorpusMetadataTests.kt` | the sidecar parser's own tests |
 | `FixedStepClock.kt` | frame clock driven by the sequence's timestep, not the host |
 | `ReplayBaseline.kt` | loads/formats `test/resources/replay-baseline.txt` |
 | `dev.slimevr.metrics.PoseMetrics` | the metrics themselves (in `main`, so non-test code can use them) |
 | `dev.slimevr.tracking.processor.skeleton.FrameClock` | the injection point, in `main` |
 
-## Why synthetic motion
+## Two motion sources, one set of metrics
 
-The server already has a full `.pfr` record/replay implementation in
-`dev.slimevr.poseframeformat`, including `TrackerFramesPlayer`, which replays
-recordings back in as live trackers. That is the right input for testing against
-real captures — but there are no recordings in the repository.
+| source | what it is | status |
+| --- | --- | --- |
+| `SyntheticMotion` | closed-form sequences, no assets | 4 sequences, baselined |
+| `.pfr` corpus | real captures replayed by `TrackerFramesPlayer` | **wired, empty** |
 
-Synthetic motion fills the gap and is complementary rather than inferior: it
-needs no captured data, it is reproducible, and it can isolate one behaviour at
-a time in a way a real recording never can. A `.pfr` corpus should be added on
-top of this, not instead of it.
+Everything downstream of the motion source is shared — `PoseMetrics`,
+`ReplayBaseline`, `FixedStepClock`, the configuration matrix — so a corpus
+metric and a synthetic metric of the same name mean the same thing, and a change
+to the metrics moves both together.
 
-The sequences are anatomically approximate on purpose. A regression baseline
-needs repeatability, not realism.
+Synthetic motion is complementary rather than inferior: it needs no captured
+data, it is reproducible, and it can isolate one behaviour at a time in a way a
+real recording never can. The sequences are anatomically approximate on purpose;
+a regression baseline needs repeatability, not realism.
+
+What it cannot give is sensor noise, yaw drift, mounting error, or dropout —
+the conditions the heuristics were written for. The consequence is visible in
+`replay-baseline.txt`: almost every `+legtweaks` value is `0.000000`, because
+the corrections fully absorb clean input. Those lines gate *"the corrections
+still work at all"* and nothing finer. **Recordings are the difference between a
+suite that detects breakage and one that detects degradation.**
+
+### The corpus path is built and empty
+
+`server/core/src/test/resources/corpus/` takes a `.pfr` plus a `.meta` sidecar
+and needs no code change to pick them up. See its README for the capture
+protocol, the metadata schema, provenance, and the baseline policy.
+
+The one thing that could not be built is the recordings themselves, which need
+hardware and a wearer.
+
+Wiring nothing exercises is wiring that rots, so
+`pfrRoundTripReproducesTheSyntheticBaseline` keeps the path honest until
+captures land: it pushes `squat` out through `PfrIO`, reads it back, replays it
+through the corpus driver, and requires the result to match the *committed
+synthetic baseline* for that same sequence. It currently matches to
+`0.000000` on all 14 metrics across both configurations, which pins two separate
+claims:
+
+- **The format is lossless for what the pipeline consumes.** Rotations and
+  positions survive a write/read cycle bit-identically.
+- **The corpus driver is equivalent to the synthetic driver.** Trackers
+  reconstructed by `TrackerFrames.toTracker()` are *not* configured identically
+  to the ones `SkeletonReplayTest` builds by hand — notably the reconstructed
+  head tracker is not flagged `isHmd`. Those differences demonstrably do not
+  reach the solved pose, which is what makes a corpus metric comparable to a
+  synthetic one.
+
+It is not a substitute for the corpus and cannot be: it is the same clean
+synthetic motion. It proves the path works, not that the pipeline handles
+reality.
+
+### `.pfr` does not store a sample rate
+
+Worth knowing before capturing anything. `PoseFrames.frameInterval` exists in
+memory and defaults to 0.02 s, but `PfrIO` neither writes nor reads it — the
+format is a tracker count, then per tracker a name, a frame count, and the
+frames.
+
+Every time-normalised metric depends on that number. `foot_slide_m_per_sec` is
+metres over planted *seconds*; replay a 100 Hz capture as 50 Hz and the same
+file reports half the skating. `LegTweaksBuffer` is worse, because it compares
+frame-interval-derived velocities against fixed thresholds — a wrong rate does
+not scale the output, it changes which frames count as planted at all.
+
+That is why `rate_hz` is a required sidecar field and a `.pfr` without a
+sidecar is a hard failure rather than a file replayed at a guessed rate.
 
 ## Measure the computed trackers, not the skeleton bones
 
@@ -204,6 +263,20 @@ with no optimiser attached.
 That emits a formatted block between `--- BEGIN replay-baseline.txt ---` and
 `--- END ---`. Copy the *values* into `test/resources/replay-baseline.txt`,
 keeping the explanatory comments already in that file.
+
+Corpus keys live in the same file under a `corpus:` prefix and are regenerated
+separately, since the two suites measure different motion:
+
+```sh
+./gradlew :server:core:test --tests 'dev.slimevr.replay.CorpusReplayTest' \
+    -Dreplay.writeBaseline=true
+```
+
+Each recording gets its own metric block, keyed
+`corpus:<name>[+legtweaks]/<metric>` — the reasoning is in `corpus/README.md`.
+Removing a recording means removing its block;
+`everyCorpusBaselineKeyHasARecording` fails otherwise, so a recording that
+silently stops loading cannot quietly take its metrics out of the suite.
 
 **Read the diff before committing it.** Regenerating a baseline is how a real
 regression gets blessed as expected behaviour, and it is the single most likely
