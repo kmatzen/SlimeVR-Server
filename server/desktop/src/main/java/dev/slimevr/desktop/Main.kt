@@ -25,6 +25,8 @@ import dev.slimevr.desktop.platform.windows.WindowsNamedPipeBridge
 import dev.slimevr.desktop.platform.windows.WindowsNamedPipeRpcBridge
 import dev.slimevr.desktop.serial.DesktopSerialHandler
 import dev.slimevr.desktop.tracking.trackers.hid.DesktopHIDManager
+import dev.slimevr.poseframeformat.CorpusCapture
+import dev.slimevr.poseframeformat.CorpusCaptureConsole
 import dev.slimevr.tracking.trackers.Tracker
 import io.eiren.util.OperatingSystem
 import io.eiren.util.OperatingSystem.Companion.currentPlatform
@@ -177,12 +179,32 @@ fun main(args: Array<String>) {
 		) { tracker: Tracker -> vrServer.registerTracker(tracker) }
 
 		Keybinding(vrServer)
+		// One reader for both the command loop and the prompts inside a capture:
+		// a second BufferedReader over System.in would buffer ahead and swallow
+		// the lines the other one is waiting for.
+		val console = System.`in`.bufferedReader()
+
+		// `record-corpus` captures a .pfr and its .meta sidecar together for the
+		// replay corpus (issue #15). It lives on the console rather than in the
+		// GUI because it needs no protocol change and the fields it must collect
+		// -- what the recording is for, who wore the trackers, their consent --
+		// are prose, not toggles. See corpus/README.md.
+		val corpusCapture = CorpusCapture(vrServer)
+		val corpusConsole = CorpusCaptureConsole(
+			{ name, seconds, rate, dir, attestation, onProgress ->
+				corpusCapture.capture(name, seconds, rate, dir, attestation, onProgress)
+			},
+			console,
+			System.out,
+		)
 		val scanner = thread {
 			while (true) {
-				if (readln() == "exit") {
+				val line = console.readLine() ?: break
+				if (line.trim() == "exit") {
 					vrServer.interrupt()
 					break
 				}
+				corpusConsole.handle(line)
 			}
 		}
 

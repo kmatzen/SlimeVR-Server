@@ -5,9 +5,10 @@ Real motion recordings, replayed through the pipeline by
 `replay-baseline.txt` as the synthetic suite.
 
 **The corpus is currently empty.** Capturing recordings needs hardware and a
-wearer; everything around them — discovery, metadata validation, the replay
-driver, baseline keys, the CI table — is built and tested. Adding a recording is
-the two-file drop described below, with no code change.
+wearer; everything around them — the capture command, discovery, metadata
+validation, the replay driver, baseline keys, the CI table — is built and
+tested. Adding a recording is one console command and a two-file drop, with no
+code change.
 
 ## Why this exists when synthetic motion already does
 
@@ -36,8 +37,70 @@ walk-in-place.meta    how it was captured
 Both are picked up automatically. A `.pfr` without a `.meta` is a hard failure,
 not a skip — see below.
 
-Capture with the server's own recorder (`PoseRecorder`, exposed in the GUI as
-the AutoBone recording flow), which writes the same format this reads.
+## Capturing one
+
+With trackers connected, type this at the running server's console:
+
+```
+record-corpus <name> <seconds> [rate-hz] [output-dir]
+```
+
+for example `record-corpus walk-in-place 180`. It prompts for the three fields
+no machine can supply — what the recording is for, who wore the trackers, and
+their consent — then records, and writes `<name>.pfr` and `<name>.meta` together
+into `./corpus` (or the directory you name). Move both into this directory and
+commit them as a pair.
+
+`rate-hz` defaults to 100. Sample rate is not recoverable afterwards, so it is
+recorded rather than assumed — see below.
+
+### Why a command rather than the AutoBone flow
+
+Earlier revisions of this file said to capture with the AutoBone recording flow
+in the GUI, "which writes the same format this reads." **It does not.**
+`AutoBoneHandler` calls `AutoBone.saveRecording`, which writes `.pfs` — a
+different container, into AutoBone's own directory, with no sidecar. Renaming a
+`.pfs` to `.pfr` does not convert it.
+
+Worse, the mistake is silent in the direction that matters. `discover()` matches
+`*.pfr` and ignores anything else, so a `.pfs` dropped into this directory is
+not an error — the recording simply is not in the suite, and no test says so.
+
+### What the command fills in for you
+
+Everything it can read off the running server, because those are the fields a
+person would otherwise transcribe from memory after the session:
+
+| field | source |
+| --- | --- |
+| `rate_hz` | the rate the recording was made at |
+| `captured` | today |
+| `trackers` | count and body placement of the connected trackers |
+| `firmware` | firmware versions reported by the devices |
+| `imu_type` | the IMU the trackers report |
+| `stay_aligned.*` | the relaxed poses in force, when Stay Aligned is enabled |
+| `offset.*` | the skeleton proportions in force |
+
+The last three are the ones worth the machinery. All three fail *silently* when
+absent or wrong — the replay completes, every metric is produced, and yaw
+correction never ran. See "Two fields that decide whether Stay Aligned runs at
+all" below for the mechanism.
+
+The command also writes deliberately *less* than it knows in one case: if Stay
+Aligned was disabled at capture it writes no `stay_aligned.*` keys at all,
+rather than writing the disabled poses. Any such key switches the correction
+**on** for the replay, so emitting them would make the replay run a correction
+the recording was never made under.
+
+After writing, it reads both files back and parses the sidecar with the same
+loader this suite uses. A capture that could not be replayed fails there, while
+the wearer is still wearing the trackers, rather than in a pull request weeks
+later.
+
+It will also warn — without failing — when a recording answers less than the
+session probably intended: no IMU type reported, or Stay Aligned off. Both
+produce a perfectly valid recording of leg behaviour and a useless one for
+issue #3.
 
 ### Why the sidecar is mandatory
 
@@ -90,6 +153,10 @@ Required fields are checked at load. Leaving one at a template placeholder
 (`TODO`, `TBD`, `unknown`, …) is rejected explicitly: an unfilled field reads as
 provenance without being any.
 
+`record-corpus` applies the same rules to what you type *before* it starts
+recording, against the same list, so a session is never spent producing a
+recording that will be rejected when someone tries to commit it.
+
 ### Example
 
 ```ini
@@ -112,6 +179,10 @@ offset.LOWER_LEG = 0.44
 Both optional in the schema and mandatory in practice for any recording captured
 to exercise yaw correction. Both fail *silently* when absent: the replay
 completes, every metric is produced, and the correction never ran.
+
+`record-corpus` fills both from the running server, which is why it exists. The
+mechanism is still worth knowing, because it is what a hand-edited sidecar gets
+wrong.
 
 **`imu_type`.** `TrackerFrames.toTracker()` builds a tracker with no IMU type
 unless told one, `Tracker.isImu()` is then false, and `AdjustTrackerYaw.adjust`
