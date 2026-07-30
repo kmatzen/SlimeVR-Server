@@ -57,25 +57,10 @@ import kotlin.test.assertTrue
  */
 class ContactDetectionTest {
 
-	private val rateHz = 100f
-	private val frames = 600
+	private val rateHz = ContactReplay.RATE_HZ
+	private val frames = ContactReplay.FRAMES
 
-	/**
-	 * Per-frame contact decisions from one replay, alongside what was true.
-	 *
-	 * Feet are kept separate rather than pooled: they are in antiphase in the
-	 * walking sequence, so pooling would average a systematic lag on one foot
-	 * against the same lag on the other and could hide a left/right asymmetry
-	 * entirely.
-	 */
-	data class Run(
-		val leftTruth: BooleanArray,
-		val rightTruth: BooleanArray,
-		val leftHeuristic: BooleanArray,
-		val rightHeuristic: BooleanArray,
-		val leftPositions: List<Vector3>,
-		val rightPositions: List<Vector3>,
-	)
+	private fun replay(motion: String) = ContactReplay.run(motion)
 
 	/**
 	 * The ground truth has to describe a foot that actually leaves the floor,
@@ -250,25 +235,7 @@ class ContactDetectionTest {
 		val run = replay("walk-in-place")
 		val labeller = OfflineContactLabeller()
 
-		fun trailingStillness(positions: List<Vector3>): BooleanArray {
-			val window = labeller.stillnessWindowFrames
-			val out = BooleanArray(positions.size)
-			for (i in positions.indices) {
-				val here = positions[i]
-				// Same radius, same height rule, same window width -- but the
-				// window ends at the frame being labelled instead of straddling
-				// it. Nothing else differs.
-				var still = true
-				for (j in maxOf(0, i - 2 * window)..i) {
-					if ((positions[j] - here).len() > labeller.stillnessRadiusM) {
-						still = false
-						break
-					}
-				}
-				out[i] = still && here.y <= labeller.floorLevelM + labeller.floorDistanceCutoffM
-			}
-			return out
-		}
+		fun trailingStillness(positions: List<Vector3>) = ContactReplay.trailingStillness(positions, labeller)
 
 		val heuristic = listOf(
 			ContactMetrics.score(run.leftHeuristic, run.leftTruth),
@@ -383,99 +350,5 @@ class ContactDetectionTest {
 			"a label at frame $earliestChanged changed because of motion at frame " +
 				"$still, which is further than the window should reach",
 		)
-	}
-
-	private fun replay(motion: String): Run {
-		val hmd = mkTracker(0, TrackerPosition.HEAD, isHmd = true)
-		val chest = mkTracker(1, TrackerPosition.CHEST)
-		val hip = mkTracker(2, TrackerPosition.HIP)
-		val leftThigh = mkTracker(3, TrackerPosition.LEFT_UPPER_LEG)
-		val leftCalf = mkTracker(4, TrackerPosition.LEFT_LOWER_LEG)
-		val rightThigh = mkTracker(5, TrackerPosition.RIGHT_UPPER_LEG)
-		val rightCalf = mkTracker(6, TrackerPosition.RIGHT_LOWER_LEG)
-
-		val trackers = listOf(hmd, chest, hip, leftThigh, leftCalf, rightThigh, rightCalf)
-		val hpm = HumanPoseManager(trackers)
-		val height = hpm.userHeightFromConfig
-		hpm.skeleton.hasKneeTrackers = true
-
-		// The corrections have to be on: contact state is computed inside
-		// LegTweaksBuffer and is only populated when the buffer is active.
-		hpm.setLegTweaksEnabled(true)
-		hpm.setToggle(SkeletonConfigToggles.SKATING_CORRECTION, true)
-		hpm.setToggle(SkeletonConfigToggles.FLOOR_CLIP, true)
-
-		val clock = FixedStepClock(1f / rateHz)
-		hpm.skeleton.legTweaks.clock = clock.clock
-		hpm.skeleton.kinematicHeading.clock = clock.clock
-
-		val leftTruth = BooleanArray(frames)
-		val rightTruth = BooleanArray(frames)
-		val leftHeuristic = BooleanArray(frames)
-		val rightHeuristic = BooleanArray(frames)
-		val leftPositions = mutableListOf<Vector3>()
-		val rightPositions = mutableListOf<Vector3>()
-
-		for (i in 0 until frames) {
-			val frame = SyntheticMotion.at(motion, i / rateHz)
-			clock.advance()
-
-			hmd.position = Vector3(0f, height * frame.headHeightFraction, 0f)
-			hmd.setRotation(Quaternion.IDENTITY)
-			chest.setRotation(frame.chest)
-			hip.setRotation(frame.hip)
-			leftThigh.setRotation(frame.leftThigh)
-			leftCalf.setRotation(frame.leftCalf)
-			rightThigh.setRotation(frame.rightThigh)
-			rightCalf.setRotation(frame.rightCalf)
-
-			hpm.update()
-
-			leftTruth[i] = frame.leftFootContact
-			rightTruth[i] = frame.rightFootContact
-
-			val buffer = hpm.skeleton.legTweaks.bufferHead
-			leftHeuristic[i] = buffer.leftLegState == LegTweaksBuffer.LOCKED
-			rightHeuristic[i] = buffer.rightLegState == LegTweaksBuffer.LOCKED
-
-			// The computed foot trackers, matching what the replay suite
-			// measures elsewhere: this is the pipeline's actual output and the
-			// only trajectory an offline labeller would have to work from.
-			leftPositions.add(hpm.getComputedTracker(TrackerRole.LEFT_FOOT).position)
-			rightPositions.add(hpm.getComputedTracker(TrackerRole.RIGHT_FOOT).position)
-		}
-
-		return Run(
-			leftTruth = leftTruth,
-			rightTruth = rightTruth,
-			leftHeuristic = leftHeuristic,
-			rightHeuristic = rightHeuristic,
-			leftPositions = leftPositions,
-			rightPositions = rightPositions,
-		)
-	}
-
-	private fun mkTracker(
-		id: Int,
-		position: TrackerPosition,
-		isHmd: Boolean = false,
-	): Tracker {
-		val tracker = Tracker(
-			device = null,
-			id = id,
-			name = position.name,
-			trackerPosition = position,
-			trackerNum = 0,
-			hasPosition = isHmd,
-			hasRotation = true,
-			isComputed = isHmd,
-			imuType = null,
-			allowReset = !isHmd,
-			allowMounting = !isHmd,
-			isHmd = isHmd,
-			trackRotDirection = false,
-		)
-		tracker.status = TrackerStatus.OK
-		return tracker
 	}
 }
