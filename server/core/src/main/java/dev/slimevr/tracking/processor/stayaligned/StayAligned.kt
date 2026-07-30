@@ -16,6 +16,44 @@ object StayAligned {
 	private var nextTrackerIndex = 0
 
 	/**
+	 * Where the frame interval comes from, in seconds.
+	 *
+	 * The correction applied per tick is proportional to this, so it decides how
+	 * fast Stay Aligned converges and is not an incidental detail.
+	 *
+	 * It was read directly from `VRServer.instance`, a `lateinit` global that
+	 * throws when unset. That made Stay Aligned impossible to run in the replay
+	 * suite at all -- not merely non-deterministic, but a crash on the first
+	 * corrected frame -- which is why the whole `stayaligned` package has no test
+	 * coverage while the estimator proposed to replace it has four test classes.
+	 *
+	 * That matters for issue #3 beyond tidiness. The comparison that issue is
+	 * waiting on is Stay Aligned against the kinematic solve on the same session,
+	 * and it was blocked on a recording corpus (#15). A corpus would not have
+	 * unblocked it: replaying one drives the same code path and hits the same
+	 * global.
+	 *
+	 * Same shape as the fix in #16, which took `LegTweaks` frame times from an
+	 * injected clock for the same reason. Defaults to the server's timer, so
+	 * production behaviour is unchanged.
+	 */
+	var frameIntervalSec: () -> Float = { VRServer.instance.fpsTimer.timePerFrame }
+
+	/**
+	 * Clears the round-robin cursor.
+	 *
+	 * [nextTrackerIndex] persists across skeletons because this is an object, so
+	 * which tracker gets adjusted first depends on how many ticks any previous
+	 * skeleton ran. In production there is one skeleton and it does not matter;
+	 * under replay it means two runs of identical input start the rotation at
+	 * different trackers and produce different output, which is the property a
+	 * regression baseline cannot be built on.
+	 */
+	fun reset() {
+		nextTrackerIndex = 0
+	}
+
+	/**
 	 * Adjusts the yaw of the next tracker.
 	 *
 	 * We only adjust one tracker per tick to minimize CPU usage. When the server is
@@ -47,7 +85,7 @@ object StayAligned {
 		// Scale yaw correction since we're only updating one tracker per tick
 		val yawCorrection =
 			yawCorrectionPerSec *
-				VRServer.instance.fpsTimer.timePerFrame *
+				frameIntervalSec() *
 				numTrackers.toFloat()
 
 		AdjustTrackerYaw.adjust(
