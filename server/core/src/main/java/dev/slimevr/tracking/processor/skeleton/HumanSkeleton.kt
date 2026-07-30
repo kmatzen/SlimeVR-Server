@@ -230,6 +230,12 @@ class HumanSkeleton(
 	 */
 	val timeAlignment = TimeAlignment()
 
+	/**
+	 * Solves tracker heading from the joints between trackers, alongside Stay
+	 * Aligned rather than instead of it. Observes and logs; corrects nothing.
+	 */
+	val kinematicHeading = KinematicHeadingShadow(allHumanBones)
+
 	// Constructors
 	init {
 		assembleSkeleton()
@@ -559,6 +565,10 @@ class HumanSkeleton(
 
 		StayAligned.adjustNextTracker(trackerSkeleton, stayAlignedConfig)
 
+		// Reads the same time-aligned rotations Stay Aligned just corrected, so
+		// what it reports is the misalignment left over after that correction.
+		kinematicHeading.update()
+
 		updateTransforms()
 		updateBones()
 		if (enforceConstraints) {
@@ -582,6 +592,9 @@ class HumanSkeleton(
 		for (bone in allHumanBones) {
 			bone.attachedTracker = getTrackerForBone(bone.boneType)
 		}
+		// Which bones have a tracker of their own decides which joints carry
+		// two independent measurements, so the joint list follows this.
+		kinematicHeading.invalidate()
 	}
 
 	/**
@@ -1272,6 +1285,10 @@ class HumanSkeleton(
 
 		// Set bone rotation offset
 		bone.rotationOffset = rotOffset
+
+		// The hinge axis is derived from this offset, so a changed bone
+		// direction invalidates the joint list too.
+		kinematicHeading.invalidate()
 	}
 
 	private fun computeDependentArmOffsets() {
@@ -1590,6 +1607,7 @@ class HumanSkeleton(
 		legTweaks.resetBuffer()
 		localizer.reset()
 		ikSolver.resetOffsets()
+		kinematicHeading.reset()
 		LogManager.info("[HumanSkeleton] Reset: full ($resetSourceName)")
 	}
 
@@ -1614,6 +1632,9 @@ class HumanSkeleton(
 			}
 		}
 		legTweaks.resetBuffer()
+		// A yaw reset moves every tracker, so evidence gathered before it
+		// describes headings that no longer exist.
+		kinematicHeading.reset()
 		LogManager.info("[HumanSkeleton] Reset: yaw ($resetSourceName)")
 	}
 
@@ -1656,6 +1677,7 @@ class HumanSkeleton(
 		}
 		legTweaks.resetBuffer()
 		localizer.reset()
+		kinematicHeading.reset()
 
 		if (humanPoseManager.server != null) {
 			humanPoseManager.server.configManager.vrConfig.resetsConfig.lastMountingMethod =

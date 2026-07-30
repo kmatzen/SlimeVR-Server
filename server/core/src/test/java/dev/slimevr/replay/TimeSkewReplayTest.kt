@@ -227,6 +227,7 @@ class TimeSkewReplayTest {
 		val height = hpm.userHeightFromConfig
 		val clock = FixedStepClock(1f / rateHz)
 		hpm.skeleton.legTweaks.clock = clock.clock
+		hpm.skeleton.kinematicHeading.clock = clock.clock
 
 		val stalled = setup.byPosition.getValue(TrackerPosition.RIGHT_LOWER_LEG)
 		var lastAnkle = Vector3.NULL
@@ -312,6 +313,7 @@ class TimeSkewReplayTest {
 
 		val clock = FixedStepClock(1f / rateHz)
 		hpm.skeleton.legTweaks.clock = clock.clock
+		hpm.skeleton.kinematicHeading.clock = clock.clock
 
 		val accumulator = PoseMetricsAccumulator()
 		val dt = 1f / rateHz

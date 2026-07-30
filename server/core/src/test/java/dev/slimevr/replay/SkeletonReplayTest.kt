@@ -271,6 +271,12 @@ class SkeletonReplayTest {
 		// the system clock survives into the replay.
 		hpm.skeleton.legTweaks.clock = clock.clock
 
+		// The heading shadow reports on a wall-clock window, which under replay
+		// would make what it logs depend on how fast the host ran. It corrects
+		// nothing, so this cannot move a baseline -- but the whole point of the
+		// injected clock is that a replay says the same thing every time.
+		hpm.skeleton.kinematicHeading.clock = clock.clock
+
 		val accumulator = PoseMetricsAccumulator()
 		val dt = 1f / rateHz
 
