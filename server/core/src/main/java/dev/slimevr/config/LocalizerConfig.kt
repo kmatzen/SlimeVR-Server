@@ -57,4 +57,46 @@ class LocalizerConfig {
 	var ballisticMaxFlightSec = 0.9f
 
 	// #endregion
+
+	// #region contact force plausibility
+
+	/**
+	 * Damp centre-of-mass motion that the feet could not have produced.
+	 *
+	 * Issue #6's proposal (2). The whole-body CoM obeys `m·a = Σ F_external`
+	 * exactly, so with the feet as the only contacts its acceleration is
+	 * confined to a friction cone whose size is set by what is touching the
+	 * floor -- and to a single point, free fall, when nothing is. See
+	 * [dev.slimevr.tracking.processor.skeleton.ContactForceLimit].
+	 *
+	 * Off by default, and for a sharper reason than the usual caution. The
+	 * constraint is exactly true only when the feet are the only contacts, and
+	 * VR users lean on desks, brace against walls, kneel and sit on furniture.
+	 * In those cases the body really is accelerating outside the cone, and
+	 * damping it would be correcting the estimate towards a physics the user is
+	 * not obeying. Turning this on trades drift for that risk, and which way the
+	 * trade goes needs recordings of people doing those things -- #15.
+	 */
+	var useContactForceLimits = false
+
+	/**
+	 * Coefficient of friction assumed between foot and floor.
+	 *
+	 * Sets how much horizontal acceleration a given vertical load can produce.
+	 * Higher is more permissive; the default is already at the high end of
+	 * plausible so the constraint fires only on motion no floor would supply.
+	 */
+	var contactFriction = dev.slimevr.tracking.processor.skeleton.ContactForceLimit.FRICTION
+
+	/**
+	 * Slack in the plausibility test, m/s^2.
+	 *
+	 * The CoM estimate is a mass-weighted sum of eight segment positions and its
+	 * acceleration is a second difference of that, so it is noisy in a way the
+	 * underlying physical quantity is not. Without slack the constraint would
+	 * spend most of its time correcting noise rather than error.
+	 */
+	var contactForceToleranceMPerSec2 = 2.0f
+
+	// #endregion
 }
