@@ -47,6 +47,48 @@ import org.apache.commons.math3.util.Pair as MathPair
  * at the optimum to produce the covariance, and a covariance built from a noisy
  * one-sided derivative is a confident-looking wrong answer -- the exact failure
  * this work exists to remove.
+ *
+ * ## Rank deficiency, and why it is not an edge case here
+ *
+ * `AutoBone.adjustOffsets` is not an identifiable parameter set, and no
+ * recording makes it one. `UPPER_CHEST` and `CHEST` are consecutive bones driven
+ * by the same chest tracker, so they always move together and only their sum is
+ * ever observable. `HEAD` and `HIPS_WIDTH` are the only two adjusted bones
+ * outside the height constraint, and neither shows up in foot slide unless the
+ * recording contains motion that separates them.
+ *
+ * Handed that problem raw, LM fails in a way that looks like success. The first
+ * step is dominated by the null directions -- they have near-zero curvature, so
+ * the normal equations ask for an enormous move along them -- and moving along
+ * them changes the cost by nothing. A step with no cost reduction is exactly
+ * what `costRelativeTolerance` is watching for, so the optimiser reports
+ * convergence having moved the unconstrained parameters somewhere arbitrary and
+ * the constrained ones not at all. Measured on a recording whose answer is known
+ * by construction, that is the whole of the gap between this path and the greedy
+ * search: see `AutoBoneHeadToHeadTests`.
+ *
+ * The fix is Tikhonov regularisation on the parameters, sized relative to the
+ * data rather than in absolute units. A prior residual `sqrt(w)·(θ - θ₀)` per
+ * parameter puts a floor of `w` under every eigenvalue of `JᵀJ`, so no direction
+ * is free, and with `w = lmRegularisation · λ_max` the floor is a stated
+ * fraction of the best-constrained direction rather than a number that has to be
+ * retuned per recording.
+ *
+ * What it does to a parameter the recording cannot see is the behaviour that was
+ * wanted anyway: it stays at its starting value, which is the population
+ * default, rather than absorbing whatever the null-space step happened to hand
+ * it.
+ *
+ * Two properties are deliberately preserved:
+ *
+ * - The prior rows have an **analytic** Jacobian, `sqrt(w)·I`, so they add
+ *   nothing to the per-iteration cost. Sizing the weight needs one Jacobian at
+ *   the start point, `2n` evaluations, charged once; that shows up in the
+ *   reported evaluation count rather than being hidden.
+ * - The covariance is computed from the **data rows only**. The prior makes the
+ *   solve well posed; it must not make the recording look more informative than
+ *   it is. A parameter the recording cannot determine still has to come back
+ *   unbounded, which is the finding `#22` exists to keep.
  */
 object AutoBoneLevenbergMarquardt {
 
@@ -85,13 +127,52 @@ object AutoBoneLevenbergMarquardt {
 
 		val jacobianStep = config.lmJacobianStep.toDouble()
 
+		// Sized from the data at the start point, once, so the objective stays a
+		// fixed function of theta for the whole solve -- finite differences
+		// require that, and a weight that moved with the iterate would also make
+		// "the cost went down" mean two different things on consecutive steps.
+		val priorWeight = regularisationWeight(
+			jacobian(objective, initialParameters, jacobianStep),
+			config.lmRegularisation.toDouble(),
+		)
+		val priorScale = sqrt(priorWeight)
+		val regularised = priorWeight > 0.0
+		// Prior rows are appended, so the data rows keep their indices and
+		// everything downstream can recover them by taking the first m.
+		val mTotal = if (regularised) m + n else m
+
+		if (regularised) {
+			LogManager.info(
+				"[AutoBone/LM] regularising: prior weight %.3e on each of $n parameters, holding directions the recording constrains less than %.0e of its best toward the starting lengths"
+					.format(priorWeight, config.lmRegularisation),
+			)
+		}
+
 		val model = MultivariateJacobianFunction { point: RealVector ->
 			val parameters = point.toArray()
-			val value = objective.residuals(parameters)
-			MathPair.create<RealVector, RealMatrix>(
-				ArrayRealVector(value, false),
-				Array2DRowRealMatrix(jacobian(objective, parameters, jacobianStep), false),
-			)
+			val data = objective.residuals(parameters)
+			val dataJacobian = jacobian(objective, parameters, jacobianStep)
+
+			if (!regularised) {
+				MathPair.create<RealVector, RealMatrix>(
+					ArrayRealVector(data, false),
+					Array2DRowRealMatrix(dataJacobian, false),
+				)
+			} else {
+				val value = DoubleArray(mTotal)
+				System.arraycopy(data, 0, value, 0, m)
+				val rows = Array(mTotal) { DoubleArray(n) }
+				for (i in 0 until m) rows[i] = dataJacobian[i]
+				for (j in 0 until n) {
+					value[m + j] = priorScale * (parameters[j] - initialParameters[j])
+					// Analytic, so the prior costs no objective evaluations.
+					rows[m + j][j] = priorScale
+				}
+				MathPair.create<RealVector, RealMatrix>(
+					ArrayRealVector(value, false),
+					Array2DRowRealMatrix(rows, false),
+				)
+			}
 		}
 
 		val builder = LeastSquaresBuilder()
@@ -99,7 +180,7 @@ object AutoBoneLevenbergMarquardt {
 			.model(model)
 			// The residuals are already the quantity to drive to zero, so the
 			// target is the zero vector rather than a set of observations.
-			.target(DoubleArray(m))
+			.target(DoubleArray(mTotal))
 			.maxEvaluations(config.lmMaxIterations * 4)
 			.maxIterations(config.lmMaxIterations)
 			.lazyEvaluation(false)
@@ -143,11 +224,15 @@ object AutoBoneLevenbergMarquardt {
 		}
 
 		val parameters = optimum?.point?.toArray() ?: initialParameters
-		val residuals = optimum?.residuals?.toArray() ?: objective.residuals(parameters)
-		val jacobian = optimum?.jacobian ?: Array2DRowRealMatrix(
-			jacobian(objective, parameters, jacobianStep),
-			false,
-		)
+		// Data rows only from here down. The prior is a device for making the
+		// solve well posed; letting it into the fit statistics would report the
+		// recording as more informative than it is, and letting it into the
+		// covariance would report a parameter the recording cannot see as
+		// determined to the width of the prior.
+		val residuals = (optimum?.residuals?.toArray() ?: objective.residuals(parameters))
+			.copyOf(m)
+		val jacobian = optimum?.jacobian?.getSubMatrix(0, m - 1, 0, n - 1)
+			?: Array2DRowRealMatrix(jacobian(objective, parameters, jacobianStep), false)
 
 		val chiSquare = residuals.sumOf { it * it }
 		// The usual unbiased estimate. With fewer residuals than parameters
@@ -171,6 +256,34 @@ object AutoBoneLevenbergMarquardt {
 			converged = converged,
 			message = message,
 		)
+	}
+
+	/**
+	 * Tikhonov weight: [relative] times the largest eigenvalue of the data
+	 * `JᵀJ`, or 0 when regularisation is switched off.
+	 *
+	 * Relative rather than absolute because the data curvature here spans many
+	 * orders of magnitude between recordings -- slide residuals scale with how
+	 * fast the user moved and with the frame spacing -- so any fixed weight
+	 * would be inert on one recording and dominant on the next. That is the
+	 * failure mode `initialAdjustRate` has, and reproducing it under a new name
+	 * would be no improvement.
+	 *
+	 * `λ_max` is bounded by the largest squared column norm times `n`, but it is
+	 * cheaper here to take the exact value: the matrix is at most 10x10 and it
+	 * has already been formed.
+	 */
+	private fun regularisationWeight(dataJacobian: Array<DoubleArray>, relative: Double): Double {
+		if (relative <= 0.0) return 0.0
+		val j = Array2DRowRealMatrix(dataJacobian, false)
+		val jtj = j.transpose().multiply(j)
+		val largest = try {
+			EigenDecomposition(jtj).realEigenvalues.maxOrNull() ?: 0.0
+		} catch (e: Exception) {
+			LogManager.warning("[AutoBone/LM] could not size the prior from JᵀJ: ${e.message}")
+			0.0
+		}
+		return if (largest > 0.0) relative * largest else 0.0
 	}
 
 	private class Analysis(

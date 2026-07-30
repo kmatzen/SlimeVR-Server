@@ -78,6 +78,28 @@ class AutoBoneConfig {
 	var lmHeightConstraintWeight = 100f
 
 	/**
+	 * Tikhonov regularisation, as a fraction of the best-constrained direction.
+	 *
+	 * `AutoBone`'s parameter set is never fully identifiable: `UPPER_CHEST` and
+	 * `CHEST` share a tracker and only their sum is observable, and `HEAD` and
+	 * `HIPS_WIDTH` sit outside the height constraint and are invisible to foot
+	 * slide unless the recording separates them. Without this, the first LM step
+	 * goes into those null directions, changes the cost by nothing, and trips
+	 * the cost-reduction convergence test -- so the solve stops having moved the
+	 * unconstrained parameters arbitrarily and the constrained ones not at all.
+	 *
+	 * Directions the recording constrains less than this fraction of its best
+	 * are held near the starting lengths, which are the population defaults.
+	 * Set to 0 to disable, which is only useful for reproducing that failure.
+	 *
+	 * This is not a step-size knob. It is expressed relative to the data, so it
+	 * does not need retuning per recording, and what it controls -- how much
+	 * evidence a recording has to supply before a bone is allowed to move -- is
+	 * a statement about identifiability rather than about the optimiser.
+	 */
+	var lmRegularisation = 1e-6f
+
+	/**
 	 * Cap on frame pairs entering the objective, or 0 for no cap.
 	 *
 	 * Every pair costs two skeleton solves per residual evaluation, and a

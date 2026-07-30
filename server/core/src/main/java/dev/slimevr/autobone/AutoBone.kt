@@ -8,6 +8,7 @@ import dev.slimevr.autobone.leastsquares.AutoBoneLevenbergMarquardt
 import dev.slimevr.autobone.leastsquares.AutoBoneObjective
 import dev.slimevr.autobone.leastsquares.AutoBoneSolution
 import dev.slimevr.config.AutoBoneConfig
+import dev.slimevr.config.ConfigManager
 import dev.slimevr.config.SkeletonConfig
 import dev.slimevr.poseframeformat.PfrIO
 import dev.slimevr.poseframeformat.PfsIO
@@ -28,7 +29,35 @@ import java.util.function.Consumer
 import java.util.function.Function
 import kotlin.math.*
 
-class AutoBone(private val server: VRServer) {
+/**
+ * @param configManager where the tuning config and the skeleton config are read
+ * from, and where [applyAndSaveConfig] writes back to.
+ * @param skeletonProvider the live skeleton, looked up lazily because
+ * `VRServer.humanPoseManager` may not be assigned yet when [AutoBone] is
+ * constructed. Returning null means "no skeleton available", which every caller
+ * already had to cope with.
+ *
+ * Taking these rather than a [VRServer] is what lets both optimisers be driven
+ * end to end from a test. `AutoBoneLeastSquaresTests` could only ever reach the
+ * least-squares path, because that one is reachable through [AutoBoneObjective]
+ * without a server; the greedy search runs only inside [processFrames], so
+ * comparing the two as users actually get them needs an [AutoBone] instance.
+ */
+class AutoBone(
+	private val configManager: ConfigManager,
+	private val skeletonProvider: () -> HumanPoseManager?,
+) {
+	constructor(server: VRServer) : this(
+		server.configManager,
+		// Not a method reference: the field is assigned after construction, and
+		// `@Suppress("SENSELESS_COMPARISON")` below is the existing
+		// acknowledgement that it can be read back as null.
+		{
+			@Suppress("SENSELESS_COMPARISON")
+			server.humanPoseManager
+		},
+	)
+
 	// This is filled by loadConfigValues()
 	val offsets = EnumMap<SkeletonConfigOffsets, Float>(
 		SkeletonConfigOffsets::class.java,
@@ -81,8 +110,8 @@ class AutoBone(private val server: VRServer) {
 	var lastSolution: AutoBoneSolution? = null
 		private set
 
-	val globalConfig: AutoBoneConfig = server.configManager.vrConfig.autoBone
-	val globalSkeletonConfig: SkeletonConfig = server.configManager.vrConfig.skeleton
+	val globalConfig: AutoBoneConfig = configManager.vrConfig.autoBone
+	val globalSkeletonConfig: SkeletonConfig = configManager.vrConfig.skeleton
 
 	init {
 		loadConfigValues()
@@ -93,7 +122,7 @@ class AutoBone(private val server: VRServer) {
 		offsets.clear()
 
 		// Get current or default skeleton configs
-		val skeleton = server.humanPoseManager
+		val skeleton = skeletonProvider()
 		// Still compensate for a null skeleton, as it may not be initialized yet
 		val getOffset: Function<SkeletonConfigOffsets, Float> =
 			if (skeleton != null) {
@@ -122,11 +151,11 @@ class AutoBone(private val server: VRServer) {
 	}
 
 	@JvmOverloads
-	fun applyAndSaveConfig(humanPoseManager: HumanPoseManager? = this.server.humanPoseManager): Boolean {
+	fun applyAndSaveConfig(humanPoseManager: HumanPoseManager? = skeletonProvider()): Boolean {
 		if (humanPoseManager == null) return false
 		applyConfig(humanPoseManager)
 		humanPoseManager.saveConfig()
-		server.configManager.saveConfig()
+		configManager.saveConfig()
 		LogManager.info("[AutoBone] Configured skeleton bone lengths")
 		return true
 	}
@@ -137,7 +166,7 @@ class AutoBone(private val server: VRServer) {
 	): Float {
 		val targetHeight: Float
 		// Get the current skeleton from the server
-		val humanPoseManager = server.humanPoseManager
+		val humanPoseManager = skeletonProvider()
 		// Still compensate for a null skeleton, as it may not be initialized yet
 		@Suppress("SENSELESS_COMPARISON")
 		if (config.useSkeletonHeight && humanPoseManager != null) {
@@ -257,7 +286,7 @@ class AutoBone(private val server: VRServer) {
 		// skeletons appropriately
 		val step = PoseFrameStep<AutoBoneStep>(
 			config = config,
-			serverConfig = server.configManager,
+			serverConfig = configManager,
 			frames = frames,
 			preEpoch = { step ->
 				// Set the current adjust rate based on the current epoch
