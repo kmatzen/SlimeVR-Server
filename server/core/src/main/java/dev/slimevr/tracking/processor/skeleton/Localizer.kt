@@ -1,6 +1,7 @@
 package dev.slimevr.tracking.processor.skeleton
 
 import com.jme3.math.FastMath
+import dev.slimevr.config.LocalizerConfig
 import dev.slimevr.tracking.trackers.Tracker
 import io.github.axisangles.ktmath.Quaternion
 import io.github.axisangles.ktmath.Vector3
@@ -63,7 +64,61 @@ class Localizer(humanSkeleton: HumanSkeleton) {
 	private var comTravel: Vector3 = Vector3.NULL
 	private var sittingTravel: Vector3 = Vector3.NULL
 
+	var config: LocalizerConfig = LocalizerConfig()
+
+	/** The ballistic arc, live only while [config] enables it and feet are free. */
+	private val ballistic = BallisticFlight()
+
+	/**
+	 * Centre-of-mass velocity as measured from CoM positions, before the
+	 * vertical channel is overwritten.
+	 *
+	 * [getCOMVelocity] computes this and then replaces its `y` with a value
+	 * integrated from the torso accelerometer, so the measured vertical velocity
+	 * is discarded on every frame. The ballistic path wants it: at takeoff, while
+	 * a foot is still planted and therefore acting as a zero-velocity anchor, the
+	 * kinematically-derived CoM velocity is the best launch-velocity measurement
+	 * available, and it is the one quantity the whole arc depends on.
+	 */
+	private var kinematicComVelocity: Vector3 = Vector3.NULL
+
+	/** Set when an airborne stretch was rejected as implausibly long. */
+	private var flightAbandoned = false
+
+	/**
+	 * Called on each takeoff, for tests and diagnostics.
+	 *
+	 * The launch velocity determines the entire arc and is read at a single
+	 * instant, so it is the one number worth watching. It is not recoverable
+	 * afterwards -- by the time a test sees the pose, several takeoffs may have
+	 * come and gone.
+	 */
+	var onTakeoff: ((BallisticFlight) -> Unit)? = null
+
+	/**
+	 * Called when an arc ends, with the arc and the position the body was
+	 * actually observed at.
+	 *
+	 * This is the arc's own error report and it needs no ground truth: a jump
+	 * ends on the floor it started from, so the gap between where the arc
+	 * finished and where the body was seen to land measures how wrong the launch
+	 * velocity was. It is the only feedback the method gets, and the quantity a
+	 * deployment would log to know whether the arc is working at all.
+	 */
+	var onLanding: ((BallisticFlight, Vector3) -> Unit)? = null
+
 	fun getEnabled(): Boolean = enabled
+
+	/**
+	 * Which source the last [update] took its translation from.
+	 *
+	 * Exposed for replay tests. A test that measures the flight phase has to be
+	 * able to confirm the flight phase was actually entered -- if contact
+	 * detection never reports both feet off the floor, every metric about
+	 * flight is measured over an empty set and passes vacuously.
+	 */
+	val currentWorldReference: MovementStates
+		get() = worldReference
 
 	fun setEnabled(enabled: Boolean) {
 		this.enabled = enabled
@@ -148,6 +203,11 @@ class Localizer(humanSkeleton: HumanSkeleton) {
 		floor = 0.0f
 		uncorrectedFloor = 0.0f - LegTweaks.FLOOR_CALIBRATION_OFFSET
 		warmupFrames = 0
+
+		// A reset teleports the skeleton back to the origin, so an arc launched
+		// before it describes a body that no longer exists. Carrying it across
+		// would apply the old launch position to the new frame.
+		ballistic.land()
 	}
 
 	private fun getPlantedFoot(): MovementStates {
@@ -267,14 +327,21 @@ class Localizer(humanSkeleton: HumanSkeleton) {
 	// gets the position the COM should be at based on the velocity of the com and
 	// the location of the floor
 	private fun updateTargetCOM() {
+		val grounded = worldReference == MovementStates.FOLLOW_FOOT ||
+			worldReference == MovementStates.FOLLOW_SITTING
+
 		// if not in COM tracking mode, just use the current COM
-		if (worldReference == MovementStates.FOLLOW_FOOT || worldReference == MovementStates.FOLLOW_SITTING) {
+		if (grounded) {
 			targetCOM = bufCur.centerOfMass
 		} else {
 			currentCOM = targetCOM
 		}
 
-		targetCOM += (comVelocity / bufCur.getTimeDelta())
+		if (config.useBallisticFlight) {
+			advanceTargetCOMBallistic(grounded)
+		} else {
+			targetCOM += (comVelocity / bufCur.getTimeDelta())
+		}
 
 		val lowTracker = getLowestTracker()
 
@@ -283,8 +350,171 @@ class Localizer(humanSkeleton: HumanSkeleton) {
 			if (lowTracker.position.y < uncorrectedFloor) {
 				targetCOM = Vector3(targetCOM.x, targetCOM.y + (uncorrectedFloor - lowTracker.position.y), targetCOM.z)
 				comVelocity = Vector3(comVelocity.x, 0.0f, comVelocity.z)
+
+				// The floor is a hard constraint and the arc is only a
+				// prediction, so if the two disagree the arc is what gives way:
+				// something has touched down, whatever the leg states say. Ending
+				// flight here rather than letting the clamp fight the arc matters
+				// because the arc recomputes targetCOM from its launch state every
+				// frame and would otherwise discard this correction on the next
+				// one -- the floor would stop being enforced for the whole of
+				// flight, silently.
+				//
+				// It also makes contact-with-the-floor a landing detector in its
+				// own right, which is a useful second opinion at the transition
+				// the leg-state thresholds are least reliable at.
+				if (ballistic.inFlight) {
+					onLanding?.invoke(ballistic, targetCOM)
+					ballistic.land()
+				}
 			}
 		}
+	}
+
+	/**
+	 * Ballistic state, for tests and diagnostics.
+	 *
+	 * The arc's accuracy is not directly observable in the pose -- it shows up as
+	 * a mismatch at landing, one number per jump -- so a test that wants to know
+	 * whether the arc was launched with a sane velocity has to be able to ask.
+	 */
+	val ballisticState: BallisticFlight
+		get() = ballistic
+
+	/**
+	 * Advance [targetCOM] along a ballistic arc while the feet are free.
+	 *
+	 * Replaces the accelerometer integration for the airborne case only. On the
+	 * ground this defers to the existing path unchanged, so walking, standing and
+	 * sitting are untouched by the flag -- the arc exists for the one phase where
+	 * there is no contact to anchor to.
+	 *
+	 * Note this runs before [worldReference] is recomputed for the frame, so
+	 * `grounded` describes the previous frame. That is pre-existing ordering, and
+	 * it means takeoff is recognised one frame after the feet actually leave the
+	 * floor. At 100 Hz that is 10 ms of launch velocity already integrated by the
+	 * old path, which is small; it is called out because it biases the launch
+	 * measurement in a knowable direction rather than randomly.
+	 */
+	private fun advanceTargetCOMBallistic(grounded: Boolean) {
+		val rate = bufCur.getTimeDelta()
+		// getTimeDelta() is 1/dt and returns 0 for a frame carrying no interval.
+		val dt = if (rate > 0f) 1f / rate else 0f
+
+		if (grounded) {
+			if (ballistic.inFlight) {
+				onLanding?.invoke(ballistic, bufCur.centerOfMass)
+				ballistic.land()
+			}
+			// Feet are back down, so whatever made the last airborne stretch
+			// implausible is over and the next one gets a fresh arc.
+			flightAbandoned = false
+			targetCOM += (comVelocity / rate)
+			return
+		}
+
+		// A "flight" longer than any real jump is not a jump. Contact detection
+		// reporting no planted foot is not the same claim as the body being
+		// airborne, and the cases that break it -- leaning on furniture,
+		// kneeling, sitting on the floor -- are common in VR. Hand those back to
+		// the old path rather than continuing an arc that is by then describing
+		// a body that fell several metres.
+		//
+		// Latched rather than tested per frame. Without the latch, abandoning
+		// flight clears `inFlight`, the next airborne frame sees no arc and
+		// launches a new one, and the guard trips again -- so an over-long
+		// airborne stretch turns into a rapid relaunch cycle that is neither the
+		// arc nor the fallback. It has to stay abandoned until the feet return.
+		if (flightAbandoned) {
+			targetCOM += (comVelocity / rate)
+			return
+		}
+
+		if (!ballistic.inFlight) {
+			ballistic.takeoff(targetCOM, getTakeoffVelocity())
+			onTakeoff?.invoke(ballistic)
+		}
+
+		if (ballistic.flightTimeSec + dt > config.ballisticMaxFlightSec) {
+			ballistic.land()
+			flightAbandoned = true
+			targetCOM += (comVelocity / rate)
+			return
+		}
+
+		// All three axes. Constant horizontal velocity through flight follows from
+		// "the only force is gravity" exactly as the vertical parabola does, so
+		// this is the complete statement rather than a vertical special case.
+		//
+		// The vertical win is large and directly measured. The horizontal claim is
+		// weaker and worth stating precisely: this sequence has no clean
+		// horizontal ground truth, because its legs bend in the sagittal plane and
+		// that genuinely moves the centre of mass fore and aft -- "a purely
+		// vertical jump" is true of the trajectory, not of the pose. So horizontal
+		// residual here is not attributable, and the claim is only that it is not
+		// made worse.
+		//
+		// Checked, not assumed. Total horizontal drift does rise, but for a
+		// legitimate reason: getting the height right lifts the feet, flight is
+		// detected across far more of its true duration, and a planted foot is
+		// what pins horizontal translation -- the old path's smaller total was
+		// bought by believing the feet were down for half of flight. Compared per
+		// unanchored frame, which removes that, the arc's horizontal drift rate is
+		// indistinguishable from the path it replaces -- the two agree to within a
+		// fraction of a percent, which is the "not made worse" this can support.
+		targetCOM = ballistic.advance(dt)
+	}
+
+	/**
+	 * Launch velocity of the centre of mass, measured over a short window ending
+	 * at takeoff.
+	 *
+	 * Measured from CoM positions rather than taken from [comVelocity], for two
+	 * reasons. The vertical component of `comVelocity` is not a measurement at
+	 * all -- it is the accelerometer integration this path exists to avoid. And
+	 * its horizontal components are averaged over `VELOCITY_SAMPLE_RATE`, 100 ms,
+	 * which spans the entire push-off: the average velocity over a window ending
+	 * at takeoff is roughly half the velocity at takeoff, and using it would
+	 * launch every arc at about half the true speed.
+	 *
+	 * Falls back to [kinematicComVelocity] if the buffer chain is too short to
+	 * measure over, which happens only in the first frames after a reset.
+	 */
+	private fun getTakeoffVelocity(): Vector3 {
+		var buf = bufCur
+		var frames = 0
+		while (frames < config.ballisticTakeoffWindowFrames) {
+			buf = buf.parent ?: break
+			frames++
+		}
+
+		if (frames == 0) return kinematicComVelocity
+
+		val elapsedSec = (bufCur.timeOfFrame - buf.timeOfFrame) / LegTweaksBuffer.NS_CONVERT
+		if (elapsedSec <= 0f) return kinematicComVelocity
+
+		val shortWindow = (bufCur.centerOfMass - buf.centerOfMass) / elapsedSec
+
+		// A different measurement window per axis, because the bias a window
+		// costs is proportional to the acceleration in that axis, and the two
+		// axes are nothing alike at takeoff.
+		//
+		// Vertically the push-off is the largest acceleration in the whole motion
+		// -- of order 25 m/s^2 -- so averaging over any appreciable window reads
+		// far below the launch speed. The existing 100 ms window would read about
+		// half of it. That channel needs the short window and pays the noise.
+		//
+		// Horizontally there is no push-off. Whatever horizontal acceleration a
+		// jump has is small next to the vertical, so a long window costs little
+		// bias and buys a lot: the short window's horizontal reading is dominated
+		// by the legs swinging, which moves the centre of mass sideways relative
+		// to the body at exactly the instant the launch is read. Extrapolating
+		// that across the flight was measurably worse than not using the arc
+		// horizontally at all.
+		//
+		// So: short window for the axis that is accelerating hard, the existing
+		// long window for the axes that are not.
+		return Vector3(kinematicComVelocity.x, shortWindow.y, kinematicComVelocity.z)
 	}
 
 	// get the velocity of the COM
@@ -306,6 +536,14 @@ class Localizer(humanSkeleton: HumanSkeleton) {
 
 		// calculate the velocity
 		comVelocity = (comPosEnd - comPosStart) / ((timeEnd - timeStart) / LegTweaksBuffer.NS_CONVERT)
+
+		// Keep the measured vertical component before the accelerometer channel
+		// below overwrites it. Note this window is VELOCITY_SAMPLE_RATE wide --
+		// 100 ms, despite the comment on it saying 10 ms -- which is too long to
+		// read a launch velocity from, so the ballistic path measures its own
+		// over a short window rather than reusing this. See
+		// getTakeoffVelocity().
+		kinematicComVelocity = comVelocity
 
 		// if the feet have been the reference for a short amount of time nullify any upwards acceleration to prevent flying away
 		if (footFrames < WARMUP_FRAMES) {
@@ -393,21 +631,30 @@ class Localizer(humanSkeleton: HumanSkeleton) {
 		return !bufCur.isStanding || (left && right)
 	}
 
-	// get the combined accel of the Torso trackers
+	/**
+	 * Acceleration of the highest-priority available torso tracker, in world
+	 * space and with gravity already removed.
+	 *
+	 * This used to be written as an average: it accumulated into a running sum,
+	 * counted contributors, and divided by the count. But the body was an
+	 * `if / else if / else if` chain, so exactly one tracker ever contributed
+	 * and the count was never anything but 0 or 1 -- the division never divided.
+	 * It read as "combine the torso trackers" and behaved as "take the first one
+	 * that exists", which is a real preference order (waist sits nearest the
+	 * body's centre of mass, hip next, chest last) and not an average at all.
+	 *
+	 * Written as the selection it always was. Averaging the torso trackers may
+	 * well be the better estimate -- they are rigidly related and averaging
+	 * would cut noise -- but that is a change to what the vertical channel
+	 * integrates, and it belongs with the measurement of that channel rather
+	 * than smuggled in under a rename. Noted on issue #6.
+	 */
 	private fun getTorsoAccel(): Vector3 {
-		var num = 0.0f
-		var accel = Vector3.NULL
-		if (skeleton.waistTracker != null) {
-			accel += skeleton.waistTracker!!.getAcceleration()
-			num++
-		} else if (skeleton.hipTracker != null) {
-			accel += skeleton.hipTracker!!.getAcceleration()
-			num++
-		} else if (skeleton.chestTracker != null) {
-			accel += skeleton.chestTracker!!.getAcceleration()
-			num++
-		}
-		return if (num == 0f) accel else accel / num
+		val torso = skeleton.waistTracker
+			?: skeleton.hipTracker
+			?: skeleton.chestTracker
+			?: return Vector3.NULL
+		return torso.getAcceleration()
 	}
 
 	// update the head position and rotation

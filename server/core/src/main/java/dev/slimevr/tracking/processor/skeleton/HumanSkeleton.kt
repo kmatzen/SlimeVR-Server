@@ -254,6 +254,7 @@ class HumanSkeleton(
 		)
 		userHeightCalibration = UserHeightCalibration(server, humanPoseManager)
 		legTweaks.setConfig(server.configManager.vrConfig.legTweaks)
+		localizer.config = server.configManager.vrConfig.localizer
 		localizer.setEnabled(humanPoseManager.getToggle(SkeletonConfigToggles.SELF_LOCALIZATION))
 		stayAlignedConfig = server.configManager.vrConfig.stayAlignedConfig
 	}
