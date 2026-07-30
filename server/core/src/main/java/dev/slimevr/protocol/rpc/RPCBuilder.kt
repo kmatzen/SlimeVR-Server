@@ -14,9 +14,13 @@ fun createSkeletonConfig(
 
 	for (index in SkeletonConfigOffsets.entries.toTypedArray().indices) {
 		val `val` = SkeletonConfigOffsets.values[index]
-		val part = SkeletonPart
-			.createSkeletonPart(fbb, `val`.id, humanPoseManager.getOffset(`val`))
-		partsOffsets[index] = part
+		// `sigma` is left absent: these are the configured lengths, which carry
+		// no error model. Absent reads as "unknown"; writing the field would
+		// read as "known exactly".
+		SkeletonPart.startSkeletonPart(fbb)
+		SkeletonPart.addBone(fbb, `val`.id)
+		SkeletonPart.addValue(fbb, humanPoseManager.getOffset(`val`))
+		partsOffsets[index] = SkeletonPart.endSkeletonPart(fbb)
 	}
 
 	val parts = SkeletonConfigResponse.createSkeletonPartsVector(fbb, partsOffsets)

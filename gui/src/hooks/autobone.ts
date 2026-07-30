@@ -25,7 +25,18 @@ export interface AutoboneContext {
   hasRecording: ProcessStatus;
   hasCalibration: ProcessStatus;
   progress: number;
-  bodyParts: { bone: SkeletonBone; label: string; value: number }[] | null;
+  bodyParts:
+    | {
+        bone: SkeletonBone;
+        label: string;
+        value: number;
+        /**
+         * 1σ uncertainty on `value`, in metres, or null when the solver that
+         * produced it has no error model. Null means unknown, not zero.
+         */
+        sigma: number | null;
+      }[]
+    | null;
   eta: number;
   startRecording: () => void;
   startProcessing: () => void;
@@ -44,10 +55,11 @@ export function useProvideAutobone(): AutoboneContext {
 
   const bodyParts = useMemo(() => {
     return (
-      skeletonParts?.map(({ bone, value }) => ({
+      skeletonParts?.map(({ bone, value, sigma }) => ({
         bone,
         label: l10n.getString('skeleton_bone-' + SkeletonBone[bone]),
         value,
+        sigma: sigma ?? null,
       })) || []
     );
   }, [skeletonParts]);
