@@ -48,11 +48,15 @@ import kotlin.test.assertTrue
  *
  * ## What is not tested here
  *
- * A head-to-head against the existing greedy search on a real recording. That
- * needs `AutoBone`, which needs a `VRServer`, and more importantly it needs
- * captures the repository does not have (issue #15). The comparison here is
- * against first-order descent on the *same* objective, which is the specific
- * claim issue #7 makes about iteration counts.
+ * The head-to-head against the greedy search that ships. The comparison in this
+ * file is against first-order descent on the *same* objective, which is the
+ * specific claim issue #7 makes about iteration counts, and is not the same
+ * question as which of the two optimisers a user should get.
+ *
+ * That comparison lives in [AutoBoneHeadToHeadTests], which drives both paths
+ * through `AutoBone.processFrames`. What neither file can settle is model
+ * mismatch -- a real body is not this kinematic chain -- which still needs
+ * captures the repository does not have (issue #15).
  */
 class AutoBoneLeastSquaresTests {
 
