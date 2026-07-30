@@ -1,0 +1,9 @@
+{
+  "name": "run-slimevr-driver",
+  "private": true,
+  "type": "module",
+  "description": "Browser driver for the SlimeVR GUI. Install with: npm install --prefix .claude/skills/run-slimevr",
+  "dependencies": {
+    "playwright": "^1.56.0"
+  }
+}
