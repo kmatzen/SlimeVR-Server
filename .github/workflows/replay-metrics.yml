@@ -16,6 +16,7 @@ on:
       - 'server/core/src/main/java/dev/slimevr/metrics/**'
       - 'server/core/src/test/java/dev/slimevr/replay/**'
       - 'server/core/src/test/resources/replay-baseline.txt'
+      - 'server/core/src/test/resources/corpus/**'
       - '.github/workflows/replay-metrics.yml'
   pull_request:
     paths:
@@ -23,6 +24,7 @@ on:
       - 'server/core/src/main/java/dev/slimevr/metrics/**'
       - 'server/core/src/test/java/dev/slimevr/replay/**'
       - 'server/core/src/test/resources/replay-baseline.txt'
+      - 'server/core/src/test/resources/corpus/**'
       - '.github/workflows/replay-metrics.yml'
   workflow_dispatch:
 
@@ -49,13 +51,43 @@ jobs:
       - name: Publish metrics table
         if: always()
         run: |
+          # Gradle prefixes test stdout with "  HH:MM:SS [INFO] " under --info,
+          # so patterns anchored at the start of the line never match the
+          # metrics tables. Strip the prefix once, here, rather than trying to
+          # write every pattern below around it.
+          sed -E 's/^[[:space:]]*[0-9]{2}:[0-9]{2}:[0-9]{2} \[[A-Z]+\] //' \
+            replay-output.txt > replay-metrics.txt
+
           {
             echo '## Skeleton replay metrics'
             echo
             echo '```'
-            grep -E '^\s+(metric|stand|squat|walk-in-place|lean)/?' replay-output.txt \
+            grep -E '^(metric +baseline|(stand|squat|walk-in-place|lean)[/+])' replay-metrics.txt \
+              | grep -v 'via .pfr' \
               || echo 'no metrics table found'
             echo '```'
+            echo
+            echo '## Corpus metrics'
+            echo
+            echo 'Real `.pfr` recordings, replayed through the same metrics and'
+            echo 'baseline as the synthetic sequences. Empty until captures are'
+            echo 'committed -- see `server/core/src/test/resources/corpus/README.md`.'
+            echo
+            echo '```'
+            grep -E '^corpus' replay-metrics.txt || echo 'no corpus output found'
+            echo '```'
+            echo
+            echo '<details><summary>.pfr round trip vs the synthetic baseline</summary>'
+            echo
+            echo 'With no recordings committed, the corpus path is exercised by'
+            echo 'replaying a synthetic sequence out through PfrIO and back, and'
+            echo 'requiring it to reproduce its own committed synthetic baseline.'
+            echo 'A nonzero delta means the format or the corpus driver is lossy.'
+            echo
+            echo '```'
+            grep -E 'via .pfr' replay-metrics.txt || echo 'no round-trip table found'
+            echo '```'
+            echo '</details>'
             echo
             echo '## Clock-skew recovery'
             echo
@@ -65,14 +97,14 @@ jobs:
             echo 'to reach.'
             echo
             echo '```'
-            grep -E '^\s*SKEW ' replay-output.txt || echo 'no skew table found'
+            grep -E '^SKEW ' replay-metrics.txt || echo 'no skew table found'
             echo '```'
             echo
             echo '<details><summary>Replay determinism</summary>'
             echo
             echo '```'
             grep -E 'drift between identical runs|squat floor clip|squat foot slide' \
-              replay-output.txt || echo 'none reported'
+              replay-metrics.txt || echo 'none reported'
             echo '```'
             echo '</details>'
           } >> "$GITHUB_STEP_SUMMARY"
