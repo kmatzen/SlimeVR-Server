@@ -1346,6 +1346,9 @@ onboarding-automatic_proportions-verify_results-title = Verify results
 onboarding-automatic_proportions-verify_results-description = Check the results below, do they look correct?
 onboarding-automatic_proportions-verify_results-results = Recording results
 onboarding-automatic_proportions-verify_results-processing = Processing the result
+onboarding-automatic_proportions-verify_results-not_determined = not determined
+# $bones is a comma-separated list of body part names, already localized.
+onboarding-automatic_proportions-verify_results-uncertain = Your recording didn't pin down { $bones } well. Redoing it with more movement of those body parts will improve the estimate.
 onboarding-automatic_proportions-verify_results-redo = Redo recording
 onboarding-automatic_proportions-verify_results-confirm = They're correct
 

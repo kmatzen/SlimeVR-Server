@@ -92,6 +92,28 @@ useful number: `σ_θ = 0.05` means "determined to about ±5%".
 the eigenvalues are useful output in their own right. The smallest one names the
 parameter combination the recording failed to determine.
 
+### Unconstrained parameters report as unbounded, not as precise
+
+Worth stating on its own, because getting it wrong is worse than reporting
+nothing and it is not obvious.
+
+When `JᵀJ` is rank deficient, the pseudo-inverse leaves the null directions out
+of the sum. Omitting a direction is *not* the same as that direction not
+mattering: a parameter living in one has unbounded variance, and dropping the
+direction gives it a small variance instead — so the least determined parameter
+comes back looking like the best determined.
+
+Any parameter with a real component in a dropped direction is therefore flagged
+and reported as infinite. Downstream, infinite means "this recording cannot see
+this bone at all", which the GUI renders as *not determined* rather than as a
+number.
+
+This was found by running the app, not by the tests. Two well-separated leg
+bones are never exactly singular, so the fixtures here stayed well conditioned
+enough to hide it. `aParameterTheRecordingCannotSeeIsReportedAsUnbounded` pins
+it using `SHOULDERS_WIDTH`, whose Jacobian column against foot slide is exactly
+zero.
+
 ## Why the eigenvector matters more than the diagonal
 
 Individually well-determined parameters can still leave a *combination* badly

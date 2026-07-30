@@ -3,6 +3,28 @@ import { ProcessStatus, useAutobone } from '@/hooks/autobone';
 import { Button } from '@/components/commons/Button';
 import { Typography } from '@/components/commons/Typography';
 import { useLocalization } from '@fluent/react';
+import { useMemo } from 'react';
+
+/**
+ * Relative uncertainty above which a measurement is called out rather than
+ * shown as a plain number.
+ *
+ * 10% of a bone length is far more than a good recording produces and far less
+ * than a degenerate one does, so it separates the two cases without needing to
+ * be tuned precisely.
+ */
+const UNCERTAIN_FRACTION = 0.1;
+
+/**
+ * Whether an uncertainty is worth printing as a number.
+ *
+ * An error bar as large as the bone itself carries no information — "19 cm ±
+ * 67 cm" is a worse way of saying "not determined" than saying so, and an
+ * unconstrained parameter comes back as infinite. Both are reported in words.
+ */
+function isMeaningful(value: number, sigma: number) {
+  return Number.isFinite(sigma) && sigma < value;
+}
 
 export function VerifyResultsStep({
   nextStep,
@@ -21,6 +43,18 @@ export function VerifyResultsStep({
     hasRecording,
     applyProcessing,
   } = useAutobone();
+
+  const uncertainBones = useMemo(
+    () =>
+      (bodyParts ?? [])
+        .filter(
+          ({ value, sigma }) =>
+            sigma != null &&
+            (!isMeaningful(value, sigma) || sigma / value > UNCERTAIN_FRACTION)
+        )
+        .map(({ label }) => label),
+    [bodyParts]
+  );
 
   const apply = () => {
     applyProcessing();
@@ -63,14 +97,58 @@ export function VerifyResultsStep({
                 variant === 'alone' && 'bg-background-50'
               )}
             >
-              {bodyParts?.map(({ bone, label, value }) => (
+              {bodyParts?.map(({ bone, label, value, sigma }) => (
                 <div className="flex justify-between" key={bone}>
                   <Typography>{label}</Typography>
-                  <Typography bold sentryMask>
-                    {(value * 100).toFixed(2)} CM
-                  </Typography>
+                  <div className="flex gap-1 items-baseline">
+                    <Typography bold sentryMask>
+                      {(value * 100).toFixed(2)} CM
+                    </Typography>
+                    {/*
+                      Only rendered when the solver reported one. An estimator
+                      without an error model sends nothing, and showing "± 0"
+                      for it would claim a certainty nobody measured.
+                    */}
+                    {sigma != null &&
+                      (isMeaningful(value, sigma) ? (
+                        <Typography
+                          variant="standard"
+                          color={
+                            sigma / value > UNCERTAIN_FRACTION
+                              ? 'text-status-warning'
+                              : 'secondary'
+                          }
+                          sentryMask
+                        >
+                          ± {(sigma * 100).toFixed(2)}
+                        </Typography>
+                      ) : (
+                        <Typography
+                          variant="standard"
+                          color="text-status-warning"
+                        >
+                          {l10n.getString(
+                            'onboarding-automatic_proportions-verify_results-not_determined'
+                          )}
+                        </Typography>
+                      ))}
+                  </div>
                 </div>
               ))}
+              {/*
+                A bone can be individually plausible and still be badly
+                determined by this particular recording -- never bending the
+                knees pins thigh + shin while leaving the split free. Naming
+                the affected bones is more actionable than a bare number.
+              */}
+              {uncertainBones.length > 0 && (
+                <Typography variant="standard" color="text-status-warning">
+                  {l10n.getString(
+                    'onboarding-automatic_proportions-verify_results-uncertain',
+                    { bones: uncertainBones.join(', ') }
+                  )}
+                </Typography>
+              )}
               {hasCalibration === ProcessStatus.PENDING &&
                 hasRecording === ProcessStatus.FULFILLED && (
                   <Typography>

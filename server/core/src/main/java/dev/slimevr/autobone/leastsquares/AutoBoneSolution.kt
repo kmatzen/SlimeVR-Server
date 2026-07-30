@@ -121,7 +121,10 @@ class AutoBoneSolution(
 	 * present as fact, and what motion would fix it".
 	 */
 	fun poorlyDetermined(threshold: Float = 0.1f): List<SkeletonConfigOffsets> = relativeSigma.entries
-		.filter { it.value > threshold }
+		// `!(x <= threshold)` rather than `x > threshold`, so an unbounded
+		// parameter -- infinite or NaN -- is always counted. Those are the
+		// worst determined of all, and a plain `>` would silently drop NaN.
+		.filter { !(it.value <= threshold) }
 		.sortedByDescending { it.value }
 		.map { it.key }
 
@@ -135,6 +138,15 @@ class AutoBoneSolution(
 		for ((offset, length) in lengths) {
 			val sd = sigma[offset] ?: 0f
 			val rel = relativeSigma[offset] ?: 0f
+			if (!sd.isFinite()) {
+				append(
+					"  %-22s %s cm, NOT DETERMINED by this recording\n".format(
+						offset.configKey,
+						StringUtils.prettyNumber(length * 100f, 2),
+					),
+				)
+				continue
+			}
 			append(
 				"  %-22s %s ± %s cm (± %s%%)\n".format(
 					offset.configKey,

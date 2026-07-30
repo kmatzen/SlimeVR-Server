@@ -56,6 +56,16 @@ object AutoBoneLevenbergMarquardt {
 	 */
 	private const val SINGULARITY_THRESHOLD = 1e-12
 
+	/**
+	 * Squared eigenvector component above which a parameter counts as living in
+	 * an unconstrained direction.
+	 *
+	 * 1% of a unit eigenvector. Low enough that a parameter genuinely caught in
+	 * a null direction is always flagged, high enough that numerical dust in an
+	 * otherwise well-determined parameter is not.
+	 */
+	private const val UNBOUNDED_PROJECTION = 0.01
+
 	fun solve(
 		objective: AutoBoneObjective,
 		initialParameters: DoubleArray,
@@ -200,19 +210,31 @@ object AutoBoneLevenbergMarquardt {
 		val smallest = eigenvalues.minOrNull() ?: 0.0
 		val conditionNumber = if (smallest > 0.0) largest / smallest else Double.POSITIVE_INFINITY
 
-		// Pseudo-inverse: directions that carry no information are left out
-		// rather than inverted into a variance of 1e30, which would swamp every
-		// other entry once the eigenvectors are recombined.
+		// Pseudo-inverse: directions carrying no information cannot be inverted,
+		// so they are left out of the sum.
+		//
+		// Leaving them out is not the same as them not mattering, and getting
+		// this wrong is worse than not reporting at all. A parameter that lives
+		// mostly in a dropped direction has *unbounded* variance; omitting the
+		// direction gives it a small one instead, so the least determined
+		// parameters come back looking like the best determined. That is the
+		// exact failure this covariance exists to prevent, so any parameter
+		// with a real component in a dropped direction is flagged and reported
+		// as infinite rather than as a number.
 		val floor = largest * SINGULARITY_THRESHOLD
 		val covariance = Array(n) { DoubleArray(n) }
+		val unbounded = BooleanArray(n)
 		var dropped = 0
 		for (k in 0 until n) {
+			val v = eigen.getEigenvector(k)
 			val lambda = eigenvalues[k]
 			if (lambda <= floor) {
 				dropped++
+				for (i in 0 until n) {
+					if (v.getEntry(i) * v.getEntry(i) > UNBOUNDED_PROJECTION) unbounded[i] = true
+				}
 				continue
 			}
-			val v = eigen.getEigenvector(k)
 			val scale = residualVariance / lambda
 			for (i in 0 until n) {
 				val vi = v.getEntry(i)
@@ -222,10 +244,17 @@ object AutoBoneLevenbergMarquardt {
 			}
 		}
 		if (dropped > 0) {
+			val names = objective.adjustOffsets.indices
+				.filter { unbounded[it] }
+				.joinToString { objective.adjustOffsets[it].configKey }
 			LogManager.warning(
 				"[AutoBone/LM] $dropped of $n parameter directions are unconstrained by this " +
-					"recording; their uncertainty is reported as zero because it is unbounded, not small",
+					"recording. Affected parameters are reported as unbounded rather than as a " +
+					"number: $names",
 			)
+		}
+		for (i in 0 until n) {
+			if (unbounded[i]) covariance[i][i] = Double.POSITIVE_INFINITY
 		}
 
 		// The worst-determined direction is the eigenvector with the smallest

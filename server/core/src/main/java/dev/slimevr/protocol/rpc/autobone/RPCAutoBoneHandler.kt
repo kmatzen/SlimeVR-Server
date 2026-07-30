@@ -116,7 +116,16 @@ class RPCAutoBoneHandler(
 				.createAdjustedSkeletonPartsVector(
 					fbb,
 					epoch.configValues.map { (key, value) ->
-						SkeletonPart.createSkeletonPart(fbb, key.id, value)
+						// Built field by field rather than with
+						// createSkeletonPart, so that `sigma` can be left
+						// absent. An optimiser with no error model must not
+						// claim an uncertainty of zero, which is what writing
+						// the field with a default would amount to.
+						SkeletonPart.startSkeletonPart(fbb)
+						SkeletonPart.addBone(fbb, key.id)
+						SkeletonPart.addValue(fbb, value)
+						epoch.uncertainty?.get(key)?.let { SkeletonPart.addSigma(fbb, it) }
+						SkeletonPart.endSkeletonPart(fbb)
 					}.toIntArray(),
 				)
 			val update = AutoBoneEpochResponse

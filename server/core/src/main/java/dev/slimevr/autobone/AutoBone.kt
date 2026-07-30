@@ -418,6 +418,29 @@ class AutoBone(private val server: VRServer) {
 			).toFloat(),
 		)
 
+		// One more epoch carrying the uncertainty. The GUI takes the last epoch
+		// as the result -- see RPCAutoBoneHandler.onAutoBoneEnd, which
+		// deliberately does nothing -- and covariance only exists at the
+		// optimum, so this is the first and only point at which there is
+		// anything to send.
+		epochCallback?.let { callback ->
+			val scaled = EnumMap(offsets)
+			val uncertainty = EnumMap<SkeletonConfigOffsets, Float>(SkeletonConfigOffsets::class.java)
+			for ((offset, length) in solution.lengths) {
+				scaled[offset] = length * estimatedHeight
+				solution.sigma[offset]?.let { uncertainty[offset] = it * estimatedHeight }
+			}
+			callback.accept(
+				Epoch(
+					config.lmMaxIterations,
+					config.lmMaxIterations,
+					step.data.errorStats,
+					scaled,
+					uncertainty,
+				),
+			)
+		}
+
 		LogManager.info(solution.report())
 		return solution
 	}
@@ -776,6 +799,17 @@ class AutoBone(private val server: VRServer) {
 		val totalEpochs: Int,
 		val epochError: StatsCalculator,
 		val configValues: EnumMap<SkeletonConfigOffsets, Float>,
+		/**
+		 * 1σ uncertainty per bone, in the same units as [configValues], or null
+		 * when the optimiser that produced this has no error model.
+		 *
+		 * Null rather than zero on purpose: "not known" and "known exactly" are
+		 * different claims, and only one of them is ever true here. The greedy
+		 * path always sends null; the least-squares path sends null while it is
+		 * still iterating -- covariance only exists at the optimum -- and fills
+		 * this in on a final epoch once it has converged.
+		 */
+		val uncertainty: EnumMap<SkeletonConfigOffsets, Float>? = null,
 	) {
 		override fun toString(): String = "Epoch: $epoch, Epoch error: $epochError"
 	}
