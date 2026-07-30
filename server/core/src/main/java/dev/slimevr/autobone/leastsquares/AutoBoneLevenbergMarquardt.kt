@@ -150,6 +150,7 @@ object AutoBoneLevenbergMarquardt {
 		return AutoBoneSolution.from(
 			offsets = objective.adjustOffsets,
 			parameters = parameters,
+			heightIndex = objective.heightIndex,
 			covariance = analysis.covariance,
 			worstDirection = analysis.worstDirection,
 			conditionNumber = analysis.conditionNumber,
@@ -233,9 +234,12 @@ object AutoBoneLevenbergMarquardt {
 		val worst = worstIndex?.let { index ->
 			val lambda = max(eigenvalues[index], floor)
 			val v = eigen.getEigenvector(index)
-			val components = LinkedHashMap<dev.slimevr.tracking.processor.config.SkeletonConfigOffsets, Double>()
+			val components = LinkedHashMap<String, Double>()
 			for (i in objective.adjustOffsets.indices) {
-				components[objective.adjustOffsets[i]] = v.getEntry(i)
+				components[objective.adjustOffsets[i].configKey] = v.getEntry(i)
+			}
+			if (objective.heightIndex >= 0) {
+				components[AutoBoneSolution.HEIGHT] = v.getEntry(objective.heightIndex)
 			}
 			AutoBoneSolution.Direction(components, sqrt(residualVariance / lambda))
 		}
