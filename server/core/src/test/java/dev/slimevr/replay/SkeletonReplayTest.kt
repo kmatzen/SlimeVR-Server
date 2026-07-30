@@ -2,6 +2,8 @@ package dev.slimevr.replay
 
 import dev.slimevr.metrics.PoseMetrics
 import dev.slimevr.metrics.PoseMetricsAccumulator
+import dev.slimevr.metrics.SegmentConsistency
+import dev.slimevr.metrics.SegmentConsistencyAccumulator
 import dev.slimevr.tracking.processor.HumanPoseManager
 import dev.slimevr.tracking.processor.config.SkeletonConfigToggles
 import dev.slimevr.tracking.trackers.Tracker
@@ -240,11 +242,48 @@ class SkeletonReplayTest {
 		)
 	}
 
+	/**
+	 * One replay's numbers: where the output is, and whether it is a body.
+	 *
+	 * [SegmentConsistency] is folded in here rather than left to
+	 * [SegmentConsistencyTest] so that it reaches the committed baseline, which
+	 * is issue #4's first suggested step. It matters more than one more metric
+	 * usually would.
+	 *
+	 * Almost every `+legtweaks` line in `replay-baseline.txt` is `0.000000`,
+	 * because the corrections fully absorb clean synthetic input. Those lines
+	 * gate *"the corrections still work at all"* and nothing finer -- there is no
+	 * headroom left to express degradation, which is the argument issue #15
+	 * makes for needing recordings.
+	 *
+	 * Deformation is the exception, and it is the exception for a structural
+	 * reason rather than a lucky one: the corrections drive slide and clip to
+	 * zero *by* moving joints independently, so the very frames where those read
+	 * zero are the frames where this reads largest -- up to 0.16 m on `squat`,
+	 * 11% of a segment. It is the one channel in the suite where a change that
+	 * made the leg path meaningfully worse can move a number today, without a
+	 * corpus.
+	 */
+	private class ReplayResult(
+		val pose: PoseMetrics,
+		val consistency: SegmentConsistency,
+	) {
+		val footSlideMPerSec: Float get() = pose.footSlideMPerSec
+		val floorClipMaxM: Float get() = pose.floorClipMaxM
+
+		fun toMap(): Map<String, Float> = pose.toMap() +
+			linkedMapOf(
+				"segment_deformation_mean_m" to consistency.meanViolationM,
+				"segment_deformation_max_m" to consistency.maxViolationM,
+				"segment_deformation_fraction" to consistency.meanViolationFraction,
+			)
+	}
+
 	private fun replay(
 		motion: String,
 		enableSkatingCorrection: Boolean = false,
 		clock: FixedStepClock = FixedStepClock(1f / rateHz),
-	): PoseMetrics {
+	): ReplayResult {
 		val hmd = mkTracker(0, TrackerPosition.HEAD, isHmd = true)
 		val chest = mkTracker(1, TrackerPosition.CHEST)
 		val hip = mkTracker(2, TrackerPosition.HIP)
@@ -278,6 +317,7 @@ class SkeletonReplayTest {
 		hpm.skeleton.kinematicHeading.clock = clock.clock
 
 		val accumulator = PoseMetricsAccumulator()
+		val consistency = SegmentConsistencyAccumulator()
 		val dt = 1f / rateHz
 
 		for (frame in SyntheticMotion.sequence(motion, frames, rateHz)) {
@@ -296,6 +336,8 @@ class SkeletonReplayTest {
 
 			hpm.update()
 
+			consistency.observe(hpm.skeleton)
+
 			// Measure the computed foot trackers rather than the skeleton's own
 			// bones: that is the pipeline's actual output, and it is the only
 			// place the LegTweaks corrections are visible.
@@ -306,7 +348,7 @@ class SkeletonReplayTest {
 			)
 		}
 
-		return accumulator.result(height)
+		return ReplayResult(accumulator.result(height), consistency.result())
 	}
 
 	private fun mkTracker(
