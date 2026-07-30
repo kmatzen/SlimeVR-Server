@@ -3,6 +3,10 @@ package dev.slimevr.autobone
 import dev.slimevr.SLIMEVR_IDENTIFIER
 import dev.slimevr.VRServer
 import dev.slimevr.autobone.errors.*
+import dev.slimevr.autobone.leastsquares.AutoBoneErrorSet
+import dev.slimevr.autobone.leastsquares.AutoBoneLevenbergMarquardt
+import dev.slimevr.autobone.leastsquares.AutoBoneObjective
+import dev.slimevr.autobone.leastsquares.AutoBoneSolution
 import dev.slimevr.config.AutoBoneConfig
 import dev.slimevr.config.SkeletonConfig
 import dev.slimevr.poseframeformat.PfrIO
@@ -51,14 +55,31 @@ class AutoBone(private val server: VRServer) {
 	var adjustedHeightNormalized: Float = 1f
 
 	// #region Error functions
-	var slideError = SlideError()
-	var offsetSlideError = OffsetSlideError()
-	var footHeightOffsetError = FootHeightOffsetError()
-	var bodyProportionError = BodyProportionError()
-	var heightError = HeightError()
-	var positionError = PositionError()
-	var positionOffsetError = PositionOffsetError()
+
+	/**
+	 * Shared with the least-squares path, so both optimisers are provably
+	 * measuring the same thing rather than two copies that can drift apart.
+	 */
+	val errorSet = AutoBoneErrorSet()
+
+	val slideError get() = errorSet.slideError
+	val offsetSlideError get() = errorSet.offsetSlideError
+	val footHeightOffsetError get() = errorSet.footHeightOffsetError
+	val bodyProportionError get() = errorSet.bodyProportionError
+	val heightError get() = errorSet.heightError
+	val positionError get() = errorSet.positionError
+	val positionOffsetError get() = errorSet.positionOffsetError
 	// #endregion
+
+	/**
+	 * Covariance and diagnostics from the most recent Levenberg-Marquardt
+	 * solve, or null if the greedy path ran.
+	 *
+	 * The greedy search has no error model, so there is nothing honest to put
+	 * here for it -- null means "not available", not "zero uncertainty".
+	 */
+	var lastSolution: AutoBoneSolution? = null
+		private set
 
 	val globalConfig: AutoBoneConfig = server.configManager.vrConfig.autoBone
 	val globalSkeletonConfig: SkeletonConfig = server.configManager.vrConfig.skeleton
@@ -272,7 +293,12 @@ class AutoBone(private val server: VRServer) {
 		}
 
 		// Iterate frames now that it's set up
-		PoseFrameIterator.iterateFrames(step)
+		if (config.useLevenbergMarquardt) {
+			lastSolution = solveLeastSquares(step, config, epochCallback)
+		} else {
+			lastSolution = null
+			PoseFrameIterator.iterateFrames(step)
+		}
 
 		// Scale the normalized offsets to the estimated height for the final result
 		for (entry in offsets.entries) {
@@ -291,7 +317,100 @@ class AutoBone(private val server: VRServer) {
 			estimatedHeight,
 			step.data.targetHmdHeight,
 			offsets,
+			// Scaled out of normalised units so the uncertainties are in the
+			// same metres as the lengths beside them.
+			lastSolution?.scaled(estimatedHeight),
 		)
+	}
+
+	/**
+	 * Runs the Levenberg-Marquardt path and writes its result back into
+	 * [offsets], leaving [processFrames] to scale and return it exactly as it
+	 * does for the greedy path.
+	 *
+	 * Height is held at the target here. With the default `scaleEachStep = true`
+	 * the greedy path does the same, so this is not a behaviour change for
+	 * default config; with `scaleEachStep = false` it is, and it says so rather
+	 * than quietly ignoring the setting. Estimating height jointly is a matter
+	 * of adding one parameter and is left until the bone lengths themselves
+	 * have been compared against the greedy path on real recordings.
+	 */
+	private fun solveLeastSquares(
+		step: PoseFrameStep<AutoBoneStep>,
+		config: AutoBoneConfig,
+		epochCallback: Consumer<Epoch>? = null,
+	): AutoBoneSolution {
+		if (!config.scaleEachStep) {
+			LogManager.warning(
+				"[AutoBone] scaleEachStep is off, but the Levenberg-Marquardt path holds " +
+					"height at the target. Height will not be estimated.",
+			)
+		}
+
+		// Only bones that actually have a length to adjust; loadConfigValues
+		// drops any whose offset is non-positive.
+		val solveOffsets = adjustOffsets.filter { offsets.containsKey(it) }
+		check(solveOffsets.isNotEmpty()) { "No adjustable bone lengths available to solve for." }
+
+		val framePairs = AutoBoneObjective.sampleFramePairs(
+			frameCount = step.maxFrameCount,
+			config = config,
+			maxPairs = config.lmMaxFramePairs,
+		)
+		check(framePairs.isNotEmpty()) { "Recording is too short to form a frame pair." }
+
+		val terms = AutoBoneObjective.enabledTerms(config, errorSet)
+		check(terms.isNotEmpty()) { "Every error term is disabled; there is nothing to minimise." }
+
+		val objective = AutoBoneObjective(
+			step = step,
+			adjustOffsets = solveOffsets,
+			normalizedHeight = adjustedHeightNormalized,
+			framePairs = framePairs,
+			terms = terms,
+			heightConstraintWeight = config.lmHeightConstraintWeight,
+		)
+
+		LogManager.info(
+			"[AutoBone/LM] ${solveOffsets.size} parameters, ${objective.residualCount} residuals " +
+				"(${framePairs.size} frame pairs x ${terms.size} terms: ${terms.joinToString { it.name }})",
+		)
+
+		val initial = objective.toParameters(offsets)
+		val solution = AutoBoneLevenbergMarquardt.solve(
+			objective = objective,
+			initialParameters = initial,
+			config = config,
+			onIteration = if (epochCallback == null) {
+				null
+			} else {
+				{ iteration, parameters ->
+					// The callback contract is "scaled to the estimated
+					// height", the same as the greedy path's.
+					val scaled = EnumMap(offsets)
+					for ((offset, length) in objective.toLengths(parameters)) {
+						scaled[offset] = length * estimatedHeight
+					}
+					epochCallback.accept(
+						Epoch(iteration, config.lmMaxIterations, step.data.errorStats, scaled),
+					)
+				}
+			},
+		)
+
+		offsets.putAll(solution.lengths)
+
+		// processFrames gates on this, so it has to describe the solution that
+		// was actually reached -- and on the same scalar the greedy path
+		// reports, or the gate would mean two different things depending on a
+		// flag.
+		step.data.errorStats.reset()
+		step.data.errorStats.addValue(
+			objective.meanStepError(objective.toParameters(solution.lengths)).toFloat(),
+		)
+
+		LogManager.info(solution.report())
+		return solution
 	}
 
 	private fun epoch(
@@ -656,6 +775,11 @@ class AutoBone(private val server: VRServer) {
 		val finalHeight: Float,
 		val targetHeight: Float,
 		val configValues: EnumMap<SkeletonConfigOffsets, Float>,
+		/**
+		 * Per-bone uncertainty, or null when the greedy path produced these
+		 * values and there is none to report.
+		 */
+		val solution: AutoBoneSolution? = null,
 	) {
 		val heightDifference: Float
 			get() = abs(targetHeight - finalHeight)
