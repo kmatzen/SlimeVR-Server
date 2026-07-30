@@ -179,9 +179,9 @@ class LegTweaksBuffer @Suppress("ktlint") constructor(
 	// center of mass
 	var centerOfMass: Vector3 = Vector3.NULL
 		private set
-	var centerOfMassVelocity: Vector3 = Vector3.NULL
+	var centerOfMassDelta: Vector3 = Vector3.NULL
 		private set
-	var centerOfMassAcceleration: Vector3 = Vector3.NULL
+	var centerOfMassDeltaChange: Vector3 = Vector3.NULL
 		private set
 
 	// other data
@@ -461,10 +461,48 @@ class LegTweaksBuffer @Suppress("ktlint") constructor(
 		rightFootAccelerationMagnitude = rightFootAcceleration.len()
 	}
 
-	// compute the velocity and acceleration of the center of mass
+	/**
+	 * Per-frame displacement of the centre of mass, and the frame-to-frame
+	 * change in that displacement. **Both are in metres.**
+	 *
+	 * Named for what they are rather than for what the force code below reads
+	 * them as. Neither is divided by the timestep, so despite being differenced
+	 * once and twice they are not m/s and m/s^2 -- at 100 Hz they are 1e-2 and
+	 * 1e-4 times the corresponding rates.
+	 *
+	 * That matters because [detectOutsideForces] and [findForceVectors] compare
+	 * [centerOfMassDeltaChange] against [GRAVITY], which is 9.81 m/s^2. A real
+	 * 25 m/s^2 push-off reaches that comparison as 2.5e-3. The term is four
+	 * orders of magnitude too small to affect any comparison it appears in, so
+	 * what those functions actually test is whether the two foot force vectors
+	 * happen to cancel gravity -- a question about where the feet are relative
+	 * to the centre of mass, not about how the body is accelerating. They read
+	 * as a dynamics test and behave as a geometry test.
+	 *
+	 * **Deliberately left as it is.** Dividing by the timestep is a one-line
+	 * change and it does not work: `FORCE_ERROR_TOLERANCE_SQR` is 4 m/s^2, and a
+	 * second difference of a mass-weighted sum of eight segment positions
+	 * exceeds that constantly. Measured on noise-free synthetic motion, the
+	 * correctly-scaled quantity reaches 44 m/s^2 on walk-in-place and 153 m/s^2
+	 * on a jump, against a standing baseline of zero -- the spikes are frame
+	 * boundaries and correction snaps, not motion. Correcting the units alone
+	 * makes `detectOutsideForces` fire on almost every moving frame, which drops
+	 * `isStanding`, collapses the foot-lock pressure scalars to their fallback,
+	 * and takes flight detection in `Localizer` from 34/39 frames to 0/39.
+	 *
+	 * So the scale error is load-bearing: the tolerance was calibrated against a
+	 * quantity 1e-4 of its nominal value, and no tolerance makes this test both
+	 * meaningful and non-disruptive while the input is a raw second difference.
+	 * Using centre-of-mass acceleration dynamically needs a smoothed estimate
+	 * first, which is a change to how foot locking behaves and belongs with
+	 * whoever owns that -- see #4 and #5. [ContactForceLimit], which is issue
+	 * #6's proposal (2), therefore derives its own acceleration from a windowed
+	 * velocity rather than building on this.
+	 */
 	private fun computeComAttributes() {
-		centerOfMassVelocity = centerOfMass - parent!!.centerOfMass
-		centerOfMassAcceleration = centerOfMassVelocity - parent!!.centerOfMassVelocity
+		val previous = parent ?: return
+		centerOfMassDelta = centerOfMass - previous.centerOfMass
+		centerOfMassDeltaChange = centerOfMassDelta - previous.centerOfMassDelta
 	}
 
 	// for a setup with foot trackers the data from the imus is enough to determine lock/unlock
@@ -639,7 +677,7 @@ class LegTweaksBuffer @Suppress("ktlint") constructor(
 
 		// based off the acceleration of the com, get the force each foot is
 		// likely applying (the expected force sum should be equal to
-		// centerOfMassAcceleration since the mass is 1)
+		// centerOfMassDeltaChange since the mass is 1)
 		val (modifiedLeftFootForce, modifiedRightFootForce) =
 			findForceVectors(leftFootForce, rightFootForce)
 
@@ -706,7 +744,7 @@ class LegTweaksBuffer @Suppress("ktlint") constructor(
 			tempRightFootForce2 = rightFootForce
 
 			// get the error at the current position
-			error = centerOfMassAcceleration - (leftFootForce + rightFootForce + GRAVITY)
+			error = centerOfMassDeltaChange - (leftFootForce + rightFootForce + GRAVITY)
 
 			// add and subtract the error to the force vectors
 			tempLeftFootForce1 *= (1.0f + stepSize)
@@ -740,10 +778,10 @@ class LegTweaksBuffer @Suppress("ktlint") constructor(
 	// as a wall or a chair. returns true if there is an outside force
 	private fun detectOutsideForces(f1: Vector3, f2: Vector3): Boolean {
 		val force: Vector3 = GRAVITY + f1 + f2
-		val error: Vector3 = centerOfMassAcceleration - force
+		val error: Vector3 = centerOfMassDeltaChange - force
 		return error.lenSq() > FORCE_ERROR_TOLERANCE_SQR
 	}
 
 	// simple error function for the force vector gradient descent
-	private fun getForceVectorError(testForce: Vector3, otherForce: Vector3): Vector3 = centerOfMassAcceleration - (testForce + otherForce + GRAVITY)
+	private fun getForceVectorError(testForce: Vector3, otherForce: Vector3): Vector3 = centerOfMassDeltaChange - (testForce + otherForce + GRAVITY)
 }

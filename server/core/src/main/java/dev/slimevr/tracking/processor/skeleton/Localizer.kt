@@ -82,6 +82,17 @@ class Localizer(humanSkeleton: HumanSkeleton) {
 	 */
 	private var kinematicComVelocity: Vector3 = Vector3.NULL
 
+	/**
+	 * Last frame's [comVelocity], for measuring the acceleration the estimate
+	 * implies.
+	 *
+	 * Held separately rather than differenced from the buffer chain because what
+	 * has to be checked is the acceleration of the *estimate*, which includes
+	 * the substituted vertical channel, not the acceleration of the kinematic
+	 * CoM the buffer records.
+	 */
+	private var previousComVelocity: Vector3 = Vector3.NULL
+
 	/** Set when an airborne stretch was rejected as implausibly long. */
 	private var flightAbandoned = false
 
@@ -140,6 +151,7 @@ class Localizer(humanSkeleton: HumanSkeleton) {
 
 		if (warmupFrames < WARMUP_FRAMES) {
 			comVelocity = Vector3.NULL
+			previousComVelocity = Vector3.NULL
 			targetFoot = Vector3.NULL
 		}
 		warmupFrames++
@@ -196,6 +208,11 @@ class Localizer(humanSkeleton: HumanSkeleton) {
 
 		skeleton.headBone.setPosition(Vector3.NULL)
 		comVelocity = Vector3.NULL
+		// Left stale, the first frame after a reset would difference a fresh
+		// zero against the last velocity from before it and report an
+		// acceleration of thousands of m/s^2.
+		previousComVelocity = Vector3.NULL
+		contactForceCorrections = 0
 
 		// when localizing without a 6 dof device we choose the floor level
 		// 0 happens to be an easy number to use
@@ -565,8 +582,79 @@ class Localizer(humanSkeleton: HumanSkeleton) {
 			comVelocity.z,
 		)
 
+		if (config.useContactForceLimits) {
+			comVelocity = limitToContactForces(comVelocity)
+		}
+		previousComVelocity = comVelocity
+
 		return comVelocity
 	}
+
+	/**
+	 * Damp [velocity] so the acceleration it implies is one the floor could have
+	 * produced.
+	 *
+	 * Applied at the end of [getCOMVelocity], after the vertical channel has been
+	 * substituted, because the quantity that has to be plausible is the one that
+	 * actually drives translation -- constraining an intermediate would leave the
+	 * accelerometer free to put back whatever was removed.
+	 *
+	 * The correction is applied to the *change* in velocity rather than to the
+	 * velocity itself. A constant velocity needs no force at all, so there is
+	 * nothing implausible about a large one; what physics constrains is how fast
+	 * it is allowed to change. Damping the velocity directly would fight steady
+	 * motion, which is the common case and the one this must not touch.
+	 */
+	private fun limitToContactForces(velocity: Vector3): Vector3 {
+		val rate = bufCur.getTimeDelta()
+		// No interval, so no acceleration is implied and there is nothing to
+		// check. Also avoids the multiply-then-divide by zero below.
+		if (rate <= 0f) return velocity
+
+		// During warmup `comVelocity` and `previousComVelocity` are both reset to
+		// zero at the top of every frame, so differencing them yields the whole
+		// velocity divided by one timestep -- an apparent acceleration a hundred
+		// times too large, on every warmup frame, on a body that may well be
+		// standing perfectly still. The estimate is held stationary by
+		// construction during warmup, so there is nothing here worth
+		// constraining anyway.
+		if (warmupFrames < WARMUP_FRAMES) return velocity
+
+		val implied = (velocity - previousComVelocity) * rate
+
+		// The previous frame's world reference, not a foot height. `worldReference`
+		// is recomputed after this runs, so this is last frame's -- the same
+		// one-frame lag the ballistic path already carries and for the same
+		// reason. It is used in preference to isFootOnGround() because that is a
+		// bare inequality on foot height against a calibrated floor, and floor
+		// clipping routinely leaves a planted foot a few millimetres above it; a
+		// standing body would intermittently read as unsupported and be told it
+		// could not be holding itself up.
+		val footOnGround = worldReference == MovementStates.FOLLOW_FOOT ||
+			worldReference == MovementStates.FOLLOW_SITTING
+
+		val allowed = ContactForceLimit.limitHorizontal(
+			implied,
+			footOnGround,
+			config.contactFriction,
+			config.contactForceToleranceMPerSec2,
+		)
+		if (allowed == implied) return velocity
+
+		contactForceCorrections++
+		return previousComVelocity + (allowed / rate)
+	}
+
+	/**
+	 * How many frames the contact-force limit has corrected since the last
+	 * reset, for tests and diagnostics.
+	 *
+	 * A constraint that never fires is doing nothing and a constraint that fires
+	 * on most frames is not a constraint but a filter. Neither is visible in the
+	 * pose, so the count has to be readable directly.
+	 */
+	var contactForceCorrections: Int = 0
+		private set
 
 	// returns true if either foot is below 0.0
 	private fun isFootOnGround(): Boolean = (
