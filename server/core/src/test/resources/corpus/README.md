@@ -79,6 +79,8 @@ exists to be read in a pull request diff.
 | `firmware` | | firmware version on the trackers |
 | `notes` | | anything about the environment worth knowing |
 | `offset.<NAME>` | | skeleton config in force at capture, e.g. `offset.UPPER_LEG = 0.42` |
+| `imu_type` | | which IMU, e.g. `BMI270`. **Required to replay Stay Aligned at all** — see below |
+| `stay_aligned.<pose>.<field>` | | the relaxed pose in force at capture. **Also required to replay Stay Aligned** |
 
 `<NAME>` is a `SkeletonConfigOffsets` constant. Any offset given is applied
 before replay, so a recording of a person who is not 1.58 m tall is not solved
@@ -104,6 +106,92 @@ notes       = Hardwood floor, no magnetic anomalies noted
 offset.UPPER_LEG = 0.42
 offset.LOWER_LEG = 0.44
 ```
+
+### Two fields that decide whether Stay Aligned runs at all
+
+Both optional in the schema and mandatory in practice for any recording captured
+to exercise yaw correction. Both fail *silently* when absent: the replay
+completes, every metric is produced, and the correction never ran.
+
+**`imu_type`.** `TrackerFrames.toTracker()` builds a tracker with no IMU type
+unless told one, `Tracker.isImu()` is then false, and `AdjustTrackerYaw.adjust`
+returns on that before doing anything. The `.pfr` container does not store the
+IMU type, so it can only come from here. Leave it out and Stay Aligned is inert
+for the entire replay.
+
+**`stay_aligned.<pose>.<field>`.** `RelaxedPose.forPose` returns null when the
+config for the player's current posture is disabled, and `adjustMovingTracker`
+returns on that null — so a standing, moving player gets no centring force. A
+default config has every pose disabled, which is what a recording that says
+nothing gets.
+
+`<pose>` is `standing`, `sitting` or `flat`. `<field>` is `enabled`,
+`upper_leg_deg`, `lower_leg_deg` or `foot_deg`. Declaring any of them turns Stay
+Aligned on for the replay; the values should be whatever the wearer actually had
+captured at the time, because a recording made to exercise Stay Aligned is
+uninterpretable without them.
+
+```ini
+imu_type = BMI270
+
+stay_aligned.standing.enabled       = true
+stay_aligned.standing.upper_leg_deg = 3.5
+stay_aligned.standing.lower_leg_deg = 1.0
+```
+
+These are the same class of gap as the missing sample rate, and worth the same
+treatment: cheap to record at capture time, impossible to recover later.
+
+## What to capture, and why each one
+
+The table above is the generic list from issue #1. The work on issues #3–#6 has
+since produced specific requirements, because each of those comparisons turned
+out to need something a recording either has or does not. Capturing with these
+in mind means one session answers four questions instead of three sessions
+answering none of them cleanly.
+
+| recording | length | what it must contain | unblocks |
+| --- | --- | --- | --- |
+| `standing-still` | 2–5 min | no deliberate motion; the null case for drift | #3 |
+| `walk-in-place` | 2–5 min | continuous knee flexion, feet clearly leaving the floor | #3, #4, #5 |
+| `crouch` | 30 s | deep knee bend, feet planted throughout | #4 |
+| `sit-to-stand` | 30 s | posture change, so the relaxed pose in force changes | #3 |
+| `jump` | 30 s | several standing jumps, with a still moment before each | #6 |
+
+**Length matters for #3 and nothing else.** Yaw drift needs minutes to develop
+past the 5° threshold that issue's acceptance criterion names. The leg
+corrections resolve within a few seconds, so a long recording buries the
+interval that matters — keep everything else short.
+
+**For #3, the recording must break Stay Aligned's assumption.** Its centring
+force pulls each tracker toward the captured relaxed pose, and measured on
+synthetic motion — where the player's stance *is* the configured relaxed pose —
+it removes essentially all injected drift. That result says nothing about real
+use, because the model was exactly right. The discriminating case is a wearer
+whose actual standing posture differs from what they captured, which is the
+ordinary case and needs no choreography. It does need `stay_aligned.*` recorded
+accurately, so the difference is visible rather than assumed away.
+
+**For #5, contact timing is the metric, not foot slide.** The existing
+heuristics drive slide to exactly zero on clean input, so slide has no headroom.
+Transition timing does. A recording is most useful here if something independent
+establishes when the feet actually landed — a lighthouse-tracked foot, or a
+pressure mat. Without that, a recording still exercises the detector under real
+noise, which synthetic motion cannot do, but the comparison becomes relative
+rather than absolute.
+
+**For #6, jumping needs a positional reference to be ground truth.** The metric
+is vertical centre-of-mass error through flight, and no IMU-only setup knows the
+true apex. A lighthouse or HMD position track alongside the recording turns it
+from "the estimate is self-consistent" into "the estimate is right". Capture
+that if the hardware is available; the recording is still worth having if not,
+because takeoff and landing timing are measurable from contact alone.
+
+**For #4, the useful recordings are the ones where the corrections engage.**
+`crouch` for floor clip, `walk-in-place` for skating. What is being measured
+there is the deformation the corrections introduce, which is nonzero on
+synthetic input already — so these recordings confirm the effect under real
+noise rather than establishing it.
 
 ## Provenance and licensing
 

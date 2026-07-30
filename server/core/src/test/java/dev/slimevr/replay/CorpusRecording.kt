@@ -1,8 +1,10 @@
 package dev.slimevr.replay
 
+import dev.slimevr.config.StayAlignedConfig
 import dev.slimevr.poseframeformat.PfrIO
 import dev.slimevr.poseframeformat.PoseFrames
 import dev.slimevr.tracking.processor.config.SkeletonConfigOffsets
+import dev.slimevr.tracking.trackers.udp.IMUType
 import java.io.File
 
 /**
@@ -40,6 +42,34 @@ class CorpusRecording(
 	val file: File,
 	val fields: Map<String, String>,
 	val offsets: Map<SkeletonConfigOffsets, Float>,
+	/**
+	 * Which IMU the trackers used, when the sidecar says.
+	 *
+	 * Not in the `.pfr`, and not cosmetic. `TrackerFrames.toTracker()` builds a
+	 * tracker with no IMU type unless told one, `Tracker.isImu()` is then false,
+	 * and `AdjustTrackerYaw.adjust` returns on that before doing anything --
+	 * **Stay Aligned is inert for the entire replay, and nothing says so.**
+	 *
+	 * Same class of gap as the missing sample rate, and it matters for the same
+	 * reason: a recording captured to answer issue #3's question about Stay
+	 * Aligned would replay with Stay Aligned switched off.
+	 */
+	val imuType: IMUType?,
+	/**
+	 * The Stay Aligned relaxed pose in force at capture, when the sidecar says.
+	 *
+	 * The second way a replay silently runs without yaw correction.
+	 * `RelaxedPose.forPose` returns null when the config for the player's current
+	 * posture is disabled and `adjustMovingTracker` returns on that null, so a
+	 * standing, moving player gets no centring force at all. Every pose is
+	 * disabled in a default config, so a recording replayed without this gets
+	 * that behaviour by default.
+	 *
+	 * Recorded per recording rather than assumed: it is whatever the wearer had
+	 * captured at the time, and a recording made to exercise Stay Aligned is
+	 * uninterpretable without it.
+	 */
+	val stayAligned: StayAlignedConfig?,
 ) {
 	/** Sample rate of the capture. Absent from the `.pfr` container itself. */
 	val rateHz: Float get() = fields.getValue(RATE_HZ).toFloat()
@@ -57,6 +87,10 @@ class CorpusRecording(
 		const val RESOURCE_DIR = "/corpus"
 
 		private const val RATE_HZ = "rate_hz"
+		private const val IMU_TYPE = "imu_type"
+
+		/** Sidecar prefix for the relaxed poses, e.g. `stay_aligned.standing.enabled`. */
+		private const val STAY_ALIGNED_PREFIX = "stay_aligned."
 
 		/**
 		 * Fields every recording must declare.
@@ -120,6 +154,90 @@ class CorpusRecording(
 		}
 
 		/**
+		 * `imu_type = BMI270`, matched against the [IMUType] enum.
+		 *
+		 * Optional, because a recording made to exercise the leg corrections has
+		 * no need of it. Rejected rather than ignored when unrecognised: a typo
+		 * here does not fail, it silently disables yaw correction for the whole
+		 * recording, which is the failure this field exists to prevent.
+		 */
+		private fun parseImuType(name: String, fields: Map<String, String>): IMUType? {
+			val raw = fields[IMU_TYPE]?.takeIf { it.isNotBlank() } ?: return null
+			val imu = IMUType.entries.firstOrNull { it.name.equals(raw, ignoreCase = true) }
+			requireNotNull(imu) {
+				"$name.meta: '$raw' is not an IMUType. Known: " +
+					IMUType.entries.joinToString { it.name }
+			}
+			return imu
+		}
+
+		/**
+		 * `stay_aligned.<pose>.<field>`, where pose is `standing`, `sitting` or
+		 * `flat` and field is `enabled`, `upper_leg_deg`, `lower_leg_deg` or
+		 * `foot_deg`.
+		 *
+		 * Returns null when the sidecar says nothing, which leaves the replay on
+		 * the default config -- every pose disabled, so no centring force. That is
+		 * the right default for a recording that says nothing about Stay Aligned,
+		 * and the wrong one to arrive at by accident, which is why the README
+		 * spells it out.
+		 */
+		private fun parseStayAligned(name: String, fields: Map<String, String>): StayAlignedConfig? {
+			if (fields.isEmpty()) return null
+
+			val config = StayAlignedConfig()
+			config.enabled = true
+
+			for ((key, value) in fields) {
+				val dot = key.indexOf('.')
+				require(dot > 0) {
+					"$name.meta: 'stay_aligned.$key' should be " +
+						"stay_aligned.<standing|sitting|flat>.<field>"
+				}
+				val poseName = key.substring(0, dot)
+				val field = key.substring(dot + 1)
+
+				val pose = when (poseName) {
+					"standing" -> config.standingRelaxedPose
+
+					"sitting" -> config.sittingRelaxedPose
+
+					"flat" -> config.flatRelaxedPose
+
+					else -> throw IllegalArgumentException(
+						"$name.meta: '$poseName' is not a relaxed pose. " +
+							"Known: standing, sitting, flat",
+					)
+				}
+
+				when (field) {
+					"enabled" -> pose.enabled = value.toBooleanStrictOrNull()
+						?: throw IllegalArgumentException(
+							"$name.meta: stay_aligned.$key must be true or false, got '$value'",
+						)
+
+					"upper_leg_deg" -> pose.upperLegAngleInDeg = requireFloat(name, key, value)
+
+					"lower_leg_deg" -> pose.lowerLegAngleInDeg = requireFloat(name, key, value)
+
+					"foot_deg" -> pose.footAngleInDeg = requireFloat(name, key, value)
+
+					else -> throw IllegalArgumentException(
+						"$name.meta: '$field' is not a relaxed pose field. " +
+							"Known: enabled, upper_leg_deg, lower_leg_deg, foot_deg",
+					)
+				}
+			}
+
+			return config
+		}
+
+		private fun requireFloat(name: String, key: String, value: String): Float = value.toFloatOrNull()
+			?: throw IllegalArgumentException(
+				"$name.meta: stay_aligned.$key is not a number: '$value'",
+			)
+
+		/**
 		 * Parses a sidecar. `key = value`, `#` comments, blank lines ignored --
 		 * the same plain-text-over-JSON reasoning as `replay-baseline.txt`: the
 		 * file exists to be read in a pull request.
@@ -127,6 +245,7 @@ class CorpusRecording(
 		fun parse(name: String, file: File, text: String): CorpusRecording {
 			val fields = linkedMapOf<String, String>()
 			val offsets = linkedMapOf<SkeletonConfigOffsets, Float>()
+			val stayAlignedFields = linkedMapOf<String, String>()
 
 			for ((lineNo, raw) in text.lines().withIndex()) {
 				val line = raw.substringBefore('#').trim()
@@ -139,7 +258,11 @@ class CorpusRecording(
 				val key = line.substring(0, eq).trim()
 				val value = line.substring(eq + 1).trim()
 
-				if (key.startsWith("offset.")) {
+				if (key.startsWith(STAY_ALIGNED_PREFIX)) {
+					require(stayAlignedFields.put(key.removePrefix(STAY_ALIGNED_PREFIX), value) == null) {
+						"$name.meta:${lineNo + 1}: duplicate key '$key'"
+					}
+				} else if (key.startsWith("offset.")) {
 					val offsetName = key.removePrefix("offset.")
 					val offset = SkeletonConfigOffsets.values.firstOrNull { it.name == offsetName }
 					requireNotNull(offset) {
@@ -175,7 +298,14 @@ class CorpusRecording(
 				"$name.meta: rate_hz must be a positive number, got '${fields.getValue(RATE_HZ)}'"
 			}
 
-			return CorpusRecording(name, file, fields, offsets)
+			return CorpusRecording(
+				name = name,
+				file = file,
+				fields = fields,
+				offsets = offsets,
+				imuType = parseImuType(name, fields),
+				stayAligned = parseStayAligned(name, stayAlignedFields),
+			)
 		}
 	}
 }

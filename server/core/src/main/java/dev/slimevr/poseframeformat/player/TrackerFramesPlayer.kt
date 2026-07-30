@@ -4,13 +4,22 @@ import dev.slimevr.poseframeformat.PoseFrames
 import dev.slimevr.poseframeformat.trackerdata.TrackerFrame
 import dev.slimevr.poseframeformat.trackerdata.TrackerFrames
 import dev.slimevr.tracking.trackers.Tracker
+import dev.slimevr.tracking.trackers.udp.IMUType
 
-class TrackerFramesPlayer(vararg val frameHolders: TrackerFrames) {
+/**
+ * @param imuType which IMU the recording was captured with, when known.
+ * See [TrackerFrames.toTracker] -- without it Stay Aligned does not run on the
+ * replayed trackers at all.
+ */
+class TrackerFramesPlayer(
+	vararg val frameHolders: TrackerFrames,
+	val imuType: IMUType? = null,
+) {
 
 	val playerTrackers: Array<PlayerTracker> = frameHolders.map { trackerFrames ->
 		PlayerTracker(
 			trackerFrames,
-			trackerFrames.toTracker(),
+			trackerFrames.toTracker(imuType),
 		)
 	}.toTypedArray()
 
@@ -28,7 +37,8 @@ class TrackerFramesPlayer(vararg val frameHolders: TrackerFrames) {
 			return frameHolders.maxOfOrNull { tracker -> tracker.frames.size } ?: 0
 		}
 
-	constructor(poseFrames: PoseFrames) : this(frameHolders = poseFrames.frameHolders.toTypedArray())
+	constructor(poseFrames: PoseFrames, imuType: IMUType? = null) :
+		this(frameHolders = poseFrames.frameHolders.toTypedArray(), imuType = imuType)
 
 	fun setCursors(index: Int) {
 		for (playerTracker in playerTrackers) {

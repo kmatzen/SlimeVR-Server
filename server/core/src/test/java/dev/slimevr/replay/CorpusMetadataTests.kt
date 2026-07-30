@@ -1,6 +1,7 @@
 package dev.slimevr.replay
 
 import dev.slimevr.tracking.processor.config.SkeletonConfigOffsets
+import dev.slimevr.tracking.trackers.udp.IMUType
 import org.junit.jupiter.api.Test
 import java.io.File
 import kotlin.test.assertEquals
@@ -29,6 +30,87 @@ class CorpusMetadataTests {
 	""".trimIndent()
 
 	private fun parse(text: String) = CorpusRecording.parse("test", File("test.pfr"), text)
+
+	// #region yaw-correction fidelity
+	//
+	// Two independent ways a replayed recording silently runs with Stay Aligned
+	// switched off. Both are recorded here because both are invisible: the replay
+	// completes, every metric is produced, and the yaw correction the recording
+	// was captured to exercise never ran.
+
+	@Test
+	fun aSidecarCanDeclareItsImuType() {
+		val recording = parse("$complete\nimu_type = BMI270")
+		assertEquals(IMUType.BMI270, recording.imuType)
+	}
+
+	/**
+	 * Absent by default, and that is a real default rather than a neutral one.
+	 *
+	 * `TrackerFrames.toTracker()` builds a tracker with no IMU type, so
+	 * `Tracker.isImu()` is false and `AdjustTrackerYaw.adjust` returns before
+	 * doing anything. A recording that does not declare its IMU replays with no
+	 * yaw correction at all.
+	 */
+	@Test
+	fun aSidecarWithoutAnImuTypeReportsNone() {
+		assertEquals(null, parse(complete).imuType)
+	}
+
+	/**
+	 * A typo must fail rather than be ignored.
+	 *
+	 * Ignoring it does not degrade gracefully -- it disables yaw correction for
+	 * the whole recording, which is precisely the failure the field exists to
+	 * prevent, arrived at by a different route.
+	 */
+	@Test
+	fun anUnrecognisedImuTypeIsRejected() {
+		val error = assertFailsWith<IllegalArgumentException> {
+			parse("$complete\nimu_type = BMI720")
+		}
+		assertTrue(
+			error.message!!.contains("BMI720"),
+			"the error should name the value that was not understood: ${error.message}",
+		)
+	}
+
+	@Test
+	fun aSidecarCanDeclareTheRelaxedPoseItWasCapturedWith() {
+		val recording = parse(
+			"$complete\n" +
+				"stay_aligned.standing.enabled = true\n" +
+				"stay_aligned.standing.upper_leg_deg = 3.5\n" +
+				"stay_aligned.sitting.enabled = false",
+		)
+
+		val config = recording.stayAligned!!
+		assertTrue(config.standingRelaxedPose.enabled)
+		assertEquals(3.5f, config.standingRelaxedPose.upperLegAngleInDeg)
+		assertTrue(!config.sittingRelaxedPose.enabled)
+	}
+
+	/**
+	 * The other silent path: with every relaxed pose disabled,
+	 * `RelaxedPose.forPose` returns null and `adjustMovingTracker` returns on it,
+	 * so a standing, moving player gets no centring force. A default config has
+	 * them all disabled, which is what a recording that says nothing gets.
+	 */
+	@Test
+	fun aSidecarWithoutARelaxedPoseReportsNone() {
+		assertEquals(null, parse(complete).stayAligned)
+	}
+
+	@Test
+	fun anUnknownRelaxedPoseFieldIsRejected() {
+		assertFailsWith<IllegalArgumentException> {
+			parse("$complete\nstay_aligned.standing.knee_deg = 3")
+		}
+		assertFailsWith<IllegalArgumentException> {
+			parse("$complete\nstay_aligned.kneeling.enabled = true")
+		}
+	}
+	// #endregion
 
 	@Test
 	fun parsesACompleteSidecar() {

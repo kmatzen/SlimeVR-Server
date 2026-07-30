@@ -1,5 +1,6 @@
 package dev.slimevr.replay
 
+import dev.slimevr.config.StayAlignedConfig
 import dev.slimevr.metrics.PoseMetrics
 import dev.slimevr.metrics.PoseMetricsAccumulator
 import dev.slimevr.poseframeformat.PoseFrames
@@ -7,7 +8,9 @@ import dev.slimevr.poseframeformat.player.TrackerFramesPlayer
 import dev.slimevr.tracking.processor.HumanPoseManager
 import dev.slimevr.tracking.processor.config.SkeletonConfigOffsets
 import dev.slimevr.tracking.processor.config.SkeletonConfigToggles
+import dev.slimevr.tracking.processor.stayaligned.StayAligned
 import dev.slimevr.tracking.trackers.TrackerRole
+import dev.slimevr.tracking.trackers.udp.IMUType
 
 /**
  * Drives a `.pfr` recording through the real pipeline and reduces it to the
@@ -41,11 +44,16 @@ object CorpusReplay {
 		rateHz: Float,
 		enableSkatingCorrection: Boolean = false,
 		offsets: Map<SkeletonConfigOffsets, Float> = emptyMap(),
+		imuType: IMUType? = null,
+		stayAligned: StayAlignedConfig? = null,
 		clock: FixedStepClock = FixedStepClock(1f / rateHz),
 	): PoseMetrics {
 		require(rateHz > 0f) { "rateHz must be positive" }
 
-		val player = TrackerFramesPlayer(frames)
+		// The IMU type has to reach the reconstructed trackers before the skeleton
+		// is built. Without it `Tracker.isImu()` is false and Stay Aligned skips
+		// every tracker for the whole replay -- see CorpusRecording.imuType.
+		val player = TrackerFramesPlayer(frames, imuType)
 		val hpm = HumanPoseManager(player.trackers.toList())
 
 		// Capture-time proportions, where the sidecar records them. Applied
@@ -60,6 +68,18 @@ object CorpusReplay {
 		// that list is whatever was actually worn. Forcing it true would make a
 		// five-point capture claim knee data it does not have, and LegTweaks
 		// gates its floor clip on exactly that flag.
+
+		// Capture-time Stay Aligned configuration. Left null the replay keeps the
+		// default, which has every relaxed pose disabled and therefore applies no
+		// centring force to a moving player.
+		stayAligned?.let { hpm.skeleton.stayAlignedConfig = it }
+
+		// Stay Aligned scales its per-tick correction by the frame interval, and
+		// reads that from the server's timer by default -- a lateinit global that
+		// throws under replay. The recording's own rate is the right answer and
+		// the driver already knows it, exactly as it already supplies the clock.
+		StayAligned.reset()
+		StayAligned.frameIntervalSec = { 1f / rateHz }
 
 		hpm.setLegTweaksEnabled(enableSkatingCorrection)
 		hpm.setToggle(SkeletonConfigToggles.SKATING_CORRECTION, enableSkatingCorrection)

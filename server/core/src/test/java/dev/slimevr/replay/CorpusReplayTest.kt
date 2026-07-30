@@ -1,13 +1,16 @@
 package dev.slimevr.replay
 
+import dev.slimevr.config.StayAlignedConfig
 import dev.slimevr.poseframeformat.PfrIO
 import dev.slimevr.poseframeformat.PoseFrames
 import dev.slimevr.poseframeformat.trackerdata.TrackerFrame
 import dev.slimevr.poseframeformat.trackerdata.TrackerFrames
 import dev.slimevr.tracking.processor.HumanPoseManager
+import dev.slimevr.tracking.processor.stayaligned.StayAligned
 import dev.slimevr.tracking.trackers.Tracker
 import dev.slimevr.tracking.trackers.TrackerPosition
 import dev.slimevr.tracking.trackers.TrackerStatus
+import dev.slimevr.tracking.trackers.udp.IMUType
 import io.eiren.util.collections.FastList
 import io.github.axisangles.ktmath.Quaternion
 import io.github.axisangles.ktmath.Vector3
@@ -88,8 +91,22 @@ class CorpusReplayTest {
 		for (recording in CorpusRecording.discover()) {
 			val frames = recording.load()
 			for ((suffix, legTweaks) in CorpusReplay.configurations) {
-				val a = CorpusReplay.replay(frames, recording.rateHz, legTweaks, recording.offsets)
-				val b = CorpusReplay.replay(frames, recording.rateHz, legTweaks, recording.offsets)
+				val a = CorpusReplay.replay(
+					frames,
+					recording.rateHz,
+					legTweaks,
+					recording.offsets,
+					recording.imuType,
+					recording.stayAligned,
+				)
+				val b = CorpusReplay.replay(
+					frames,
+					recording.rateHz,
+					legTweaks,
+					recording.offsets,
+					recording.imuType,
+					recording.stayAligned,
+				)
 				assertEquals(
 					a.toMap(),
 					b.toMap(),
@@ -172,6 +189,57 @@ class CorpusReplayTest {
 		assertAll(failures.map { { throw AssertionError(it) } })
 	}
 
+	/**
+	 * A replayed recording can actually run Stay Aligned.
+	 *
+	 * This is the property the corpus is being captured for on issue #3 -- the
+	 * open question there is Stay Aligned against the kinematic heading solve on
+	 * the same session -- and until now the corpus path could not have answered
+	 * it. `TrackerFrames.toTracker()` built trackers with no IMU type, so
+	 * `Tracker.isImu()` was false and `AdjustTrackerYaw.adjust` returned before
+	 * touching anything. Every recording would have replayed with yaw correction
+	 * silently switched off, produced a full set of metrics, and looked fine.
+	 *
+	 * Checked by difference rather than by inspecting internals: replay the same
+	 * frames with the correction configured and not, and require the pose to move.
+	 * If it does not, Stay Aligned is not running, whatever the configuration
+	 * says.
+	 */
+	@Test
+	fun aRecordingCanDriveStayAligned(@TempDir tmp: Path) {
+		val rateHz = 100f
+		val frameCount = 400
+		val file = File(tmp.toFile(), "walk.pfr")
+		PfrIO.writeToFile(file, recordSynthetic("walk-in-place", frameCount, rateHz))
+		val frames = PfrIO.readFromFile(file)
+
+		val relaxedPose = StayAlignedConfig().apply {
+			enabled = true
+			standingRelaxedPose.enabled = true
+		}
+
+		val inert = CorpusReplay.replay(frames, rateHz, false)
+
+		val corrected = CorpusReplay.replay(
+			frames,
+			rateHz,
+			false,
+			emptyMap(),
+			IMUType.BMI270,
+			relaxedPose,
+		)
+
+		println("stay aligned off: ${inert.toMap()}")
+		println("stay aligned on:  ${corrected.toMap()}")
+
+		assertTrue(
+			inert.toMap() != corrected.toMap(),
+			"declaring an IMU type and a relaxed pose changed nothing, so Stay " +
+				"Aligned is still not running on replayed recordings. The corpus " +
+				"cannot answer issue #3's question in that state.",
+		)
+	}
+
 	@Test
 	fun corpusMetricsMatchBaseline() {
 		val recordings = CorpusRecording.discover()
@@ -183,7 +251,14 @@ class CorpusReplayTest {
 		for (recording in recordings) {
 			val frames = recording.load()
 			for ((suffix, legTweaks) in CorpusReplay.configurations) {
-				val metrics = CorpusReplay.replay(frames, recording.rateHz, legTweaks, recording.offsets)
+				val metrics = CorpusReplay.replay(
+					frames,
+					recording.rateHz,
+					legTweaks,
+					recording.offsets,
+					recording.imuType,
+					recording.stayAligned,
+				)
 				for ((metric, value) in metrics.toMap()) {
 					val key = CorpusReplay.key(recording.name, suffix, metric)
 					measured[key] = value
