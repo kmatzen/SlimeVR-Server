@@ -31,6 +31,21 @@ object SyntheticMotion {
 		val rightCalf: Quaternion,
 		/** Headset height as a fraction of standing height. */
 		val headHeightFraction: Float,
+		/**
+		 * Whether each foot is intended to be on the floor this frame.
+		 *
+		 * Ground truth for contact detection, and it is ground truth in the
+		 * strong sense: these sequences are *defined* by their joint-angle
+		 * functions, so which foot is planted is a property of the definition
+		 * rather than something inferred from a signal. Nothing derives these
+		 * from foot height, velocity, or any other observable -- if they were
+		 * derived, comparing a detector against them would be comparing it
+		 * against a slightly different detector.
+		 *
+		 * See [dev.slimevr.replay.ContactDetectionTest].
+		 */
+		val leftFootContact: Boolean = true,
+		val rightFootContact: Boolean = true,
 	)
 
 	val names = listOf("stand", "squat", "walk-in-place", "lean")
@@ -120,12 +135,32 @@ object SyntheticMotion {
 	/**
 	 * Alternating leg lift at 1 Hz. Each foot leaves and returns to the floor,
 	 * which is what exercises contact detection and the skating correction.
+	 *
+	 * The lift phase is `max(0, sin)`, so each foot spends exactly half of each
+	 * cycle on the floor and the two are in antiphase. Liftoff and touchdown are
+	 * the sine's zero crossings, which makes the contact intervals exact: a foot
+	 * is planted precisely when its phase is zero. That is what
+	 * [Frame.leftFootContact] reports, and it is why this sequence rather than
+	 * the others is the one contact detection is measured on -- the rest keep
+	 * both feet down throughout and only test that a detector does not invent
+	 * liftoffs.
 	 */
 	private fun walkInPlace(t: Float): Frame {
 		val w = 2f * PI.toFloat() * 1.0f * t
 		val leftPhase = maxOf(0f, sin(w))
 		val rightPhase = maxOf(0f, sin(w + PI.toFloat()))
+		// Both labels come from the same `sin(w)` rather than each from its own
+		// phase variable. The right leg's lift is driven by `sin(w + PI)`, which
+		// is -sin(w) in exact arithmetic but not in float: PI is not exactly
+		// representable, so at a zero crossing both phases can round marginally
+		// positive and the labels would claim both feet are airborne at once --
+		// which this motion never does. Deriving both from one sine makes them
+		// exactly complementary. The disagreement with the rotation actually
+		// applied is around 1e-7 radians of thigh angle, which is a sub-nanometre
+		// difference in foot height.
 		return Frame(
+			leftFootContact = sin(w) <= 0f,
+			rightFootContact = sin(w) >= 0f,
 			chest = Quaternion.IDENTITY,
 			hip = Quaternion.IDENTITY,
 			leftThigh = axisAngle(1f, 0f, 0f, -deg(45f) * leftPhase),
