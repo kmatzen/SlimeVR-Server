@@ -426,6 +426,65 @@ class AutoBoneLeastSquaresTests {
 		)
 	}
 
+	/**
+	 * A parameter the recording cannot see at all must be reported as
+	 * unbounded, not as precise.
+	 *
+	 * This is the failure mode that survived the tests above and was caught
+	 * only by running the app: with a rank-deficient `JᵀJ`, the pseudo-inverse
+	 * leaves the null directions out of the sum, and a parameter living in one
+	 * of them then gets a *small* variance instead of an infinite one. The
+	 * least determined parameter comes back looking like the best determined —
+	 * a confident wrong answer, which is precisely what this covariance exists
+	 * to prevent.
+	 *
+	 * The tests above could not catch it because two well-separated leg bones
+	 * are never exactly singular. `SHOULDERS_WIDTH` is: nothing in a
+	 * leg-and-torso recording scored on foot slide depends on it, so its
+	 * Jacobian column is exactly zero.
+	 */
+	@Test
+	fun aParameterTheRecordingCannotSeeIsReportedAsUnbounded() {
+		val frames = record(::bentKneePose, sensorNoiseRad)
+		val config = mkConfig()
+		val offsets = solveOffsets + SkeletonConfigOffsets.SHOULDERS_WIDTH
+		val lengths = LinkedHashMap(trueLengths).also {
+			it[SkeletonConfigOffsets.SHOULDERS_WIDTH] = 0.35f
+		}
+
+		val objective = AutoBoneObjective(
+			step = mkStep(frames),
+			adjustOffsets = offsets,
+			normalizedHeight = trueLengths.values.sum(),
+			framePairs = AutoBoneObjective.sampleFramePairs(frames.maxFrameCount, config, config.lmMaxFramePairs),
+			terms = AutoBoneObjective.enabledTerms(config, AutoBoneErrorSet()),
+			heightConstraintWeight = config.lmHeightConstraintWeight,
+		)
+		val solution = AutoBoneLevenbergMarquardt.solve(objective, objective.toParameters(lengths), config)
+
+		println(solution.report())
+
+		val shoulders = solution.sigma.getValue(SkeletonConfigOffsets.SHOULDERS_WIDTH)
+		assertTrue(
+			!shoulders.isFinite(),
+			"shoulder width cannot affect foot slide, so its uncertainty is unbounded; " +
+				"it was reported as $shoulders, which reads as a precise measurement",
+		)
+		assertTrue(
+			SkeletonConfigOffsets.SHOULDERS_WIDTH in solution.poorlyDetermined(),
+			"an unbounded parameter must be listed as poorly determined",
+		)
+
+		// And the bones the recording *does* determine must be unaffected --
+		// flagging everything would be as useless as flagging nothing.
+		for (offset in solveOffsets) {
+			assertTrue(
+				solution.sigma.getValue(offset).isFinite(),
+				"$offset is determined by this recording but came back unbounded",
+			)
+		}
+	}
+
 	// #region harness
 
 	/** Per-tracker rotation noise for the covariance tests, about 0.6°. */

@@ -15,6 +15,17 @@ import { useMemo } from 'react';
  */
 const UNCERTAIN_FRACTION = 0.1;
 
+/**
+ * Whether an uncertainty is worth printing as a number.
+ *
+ * An error bar as large as the bone itself carries no information — "19 cm ±
+ * 67 cm" is a worse way of saying "not determined" than saying so, and an
+ * unconstrained parameter comes back as infinite. Both are reported in words.
+ */
+function isMeaningful(value: number, sigma: number) {
+  return Number.isFinite(sigma) && sigma < value;
+}
+
 export function VerifyResultsStep({
   nextStep,
   prevStep,
@@ -38,7 +49,8 @@ export function VerifyResultsStep({
       (bodyParts ?? [])
         .filter(
           ({ value, sigma }) =>
-            sigma != null && sigma / value > UNCERTAIN_FRACTION
+            sigma != null &&
+            (!isMeaningful(value, sigma) || sigma / value > UNCERTAIN_FRACTION)
         )
         .map(({ label }) => label),
     [bodyParts]
@@ -97,19 +109,29 @@ export function VerifyResultsStep({
                       without an error model sends nothing, and showing "± 0"
                       for it would claim a certainty nobody measured.
                     */}
-                    {sigma != null && (
-                      <Typography
-                        variant="standard"
-                        color={
-                          sigma / value > UNCERTAIN_FRACTION
-                            ? 'text-status-warning'
-                            : 'secondary'
-                        }
-                        sentryMask
-                      >
-                        ± {(sigma * 100).toFixed(2)}
-                      </Typography>
-                    )}
+                    {sigma != null &&
+                      (isMeaningful(value, sigma) ? (
+                        <Typography
+                          variant="standard"
+                          color={
+                            sigma / value > UNCERTAIN_FRACTION
+                              ? 'text-status-warning'
+                              : 'secondary'
+                          }
+                          sentryMask
+                        >
+                          ± {(sigma * 100).toFixed(2)}
+                        </Typography>
+                      ) : (
+                        <Typography
+                          variant="standard"
+                          color="text-status-warning"
+                        >
+                          {l10n.getString(
+                            'onboarding-automatic_proportions-verify_results-not_determined'
+                          )}
+                        </Typography>
+                      ))}
                   </div>
                 </div>
               ))}
