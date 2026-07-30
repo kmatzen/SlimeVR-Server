@@ -104,6 +104,24 @@ class AutoBoneObjective(
 	private val framePairs: List<Pair<Int, Int>>,
 	private val terms: List<WeightedTerm>,
 	private val heightConstraintWeight: Float,
+	/**
+	 * Solve for the user's height alongside the bone lengths.
+	 *
+	 * When set, the parameter vector gains one entry at the end, `ln(height)`,
+	 * and each residual evaluation rescales the recording to match it before
+	 * measuring anything. When clear, the recording keeps whatever scale the
+	 * caller established and the parameter vector is bone lengths only.
+	 *
+	 * The greedy path's equivalent is the block in `AutoBone.step()` guarded by
+	 * `!scaleEachStep`, which tries a step up and a step down in height and
+	 * keeps whichever scored better. That is a one-dimensional line search
+	 * interleaved with the bone search rather than a joint solve, so the two
+	 * cannot trade off against each other; here height is simply another
+	 * column of the Jacobian and the coupling comes out in the covariance.
+	 */
+	private val estimateHeight: Boolean = false,
+	/** Height the recording is scaled to when [estimateHeight] is clear. */
+	private val fixedHeight: Float = 1f,
 ) {
 	/** One error term and the weight it carries in the objective. */
 	class WeightedTerm(val name: String, val error: IAutoBoneError, val weight: Float)
@@ -117,7 +135,10 @@ class AutoBoneObjective(
 
 	private val pairScale: Double = 1.0 / framePairs.size
 
-	val parameterCount: Int get() = adjustOffsets.size
+	/** Index of the height parameter, or -1 when height is held fixed. */
+	val heightIndex: Int = if (estimateHeight) adjustOffsets.size else -1
+
+	val parameterCount: Int get() = adjustOffsets.size + if (estimateHeight) 1 else 0
 
 	val residualCount: Int get() = framePairs.size * terms.size + 1
 
@@ -129,11 +150,22 @@ class AutoBoneObjective(
 	var evaluations: Int = 0
 		private set
 
-	fun toParameters(lengths: Map<SkeletonConfigOffsets, Float>): DoubleArray = DoubleArray(adjustOffsets.size) { i ->
-		val length = lengths[adjustOffsets[i]]
-			?: error("no initial length for ${adjustOffsets[i]}")
-		require(length > 0f) { "${adjustOffsets[i]} has non-positive length $length" }
-		ln(length.toDouble())
+	fun toParameters(
+		lengths: Map<SkeletonConfigOffsets, Float>,
+		height: Float = fixedHeight,
+	): DoubleArray {
+		val out = DoubleArray(parameterCount)
+		for (i in adjustOffsets.indices) {
+			val length = lengths[adjustOffsets[i]]
+				?: error("no initial length for ${adjustOffsets[i]}")
+			require(length > 0f) { "${adjustOffsets[i]} has non-positive length $length" }
+			out[i] = ln(length.toDouble())
+		}
+		if (heightIndex >= 0) {
+			require(height > 0f) { "height must be positive, got $height" }
+			out[heightIndex] = ln(height.toDouble())
+		}
+		return out
 	}
 
 	fun toLengths(parameters: DoubleArray): LinkedHashMap<SkeletonConfigOffsets, Float> {
@@ -143,6 +175,9 @@ class AutoBoneObjective(
 		}
 		return lengths
 	}
+
+	/** The height [parameters] describes, or [fixedHeight] when it is not solved for. */
+	fun toHeight(parameters: DoubleArray): Float = if (heightIndex >= 0) exp(parameters[heightIndex]).toFloat() else fixedHeight
 
 	/**
 	 * The residual vector at [parameters].
@@ -155,16 +190,17 @@ class AutoBoneObjective(
 	fun residuals(parameters: DoubleArray): DoubleArray {
 		evaluations++
 
-		val lengths = DoubleArray(parameters.size) { exp(parameters[it]) }
+		val lengths = DoubleArray(adjustOffsets.size) { exp(parameters[it]) }
 		applyLengths(step.skeleton1, lengths)
 		applyLengths(step.skeleton2, lengths)
+		applyHeight(toHeight(parameters))
 
 		val out = DoubleArray(residualCount)
 		var at = 0
 
 		for ((cursor1, cursor2) in framePairs) {
 			// setCursors(updatePlayerCursors = true) re-solves both skeletons,
-			// so this has to happen after the offsets are applied.
+			// so this has to happen after the offsets and the scale are applied.
 			step.setCursors(cursor1, cursor2, updatePlayerCursors = true)
 			for (term in terms) {
 				out[at++] = sqrt(term.weight * pairScale) * term.error.getStepError(step)
@@ -188,9 +224,10 @@ class AutoBoneObjective(
 	 * either one's update rule.
 	 */
 	fun meanStepError(parameters: DoubleArray): Double {
-		val lengths = DoubleArray(parameters.size) { exp(parameters[it]) }
+		val lengths = DoubleArray(adjustOffsets.size) { exp(parameters[it]) }
 		applyLengths(step.skeleton1, lengths)
 		applyLengths(step.skeleton2, lengths)
+		applyHeight(toHeight(parameters))
 
 		var sum = 0.0
 		for ((cursor1, cursor2) in framePairs) {
@@ -206,6 +243,28 @@ class AutoBoneObjective(
 		for (i in adjustOffsets.indices) {
 			manager.setOffset(adjustOffsets[i], lengths[i].toFloat())
 		}
+	}
+
+	/**
+	 * Rescales the recording to [height] and tells the step what height it is
+	 * now working in.
+	 *
+	 * The offsets live in normalised units where the user is 1 unit tall, so
+	 * the recording is scaled by `1/height` to meet them rather than the
+	 * skeleton being scaled up. Setting the scale re-applies each player
+	 * tracker's position at its current cursor, and the per-pair
+	 * `setCursors` that follows re-applies it at the new one, so doing this
+	 * once per evaluation is enough.
+	 *
+	 * `hmdHeight` is what [dev.slimevr.autobone.errors.HeightError] reads, so
+	 * it has to move with the parameter or that term would measure a height
+	 * nothing is solving for.
+	 */
+	private fun applyHeight(height: Float) {
+		step.data.hmdHeight = height
+		if (heightIndex < 0) return
+		step.framePlayer1.setScales(1f / height)
+		step.framePlayer2.setScales(1f / height)
 	}
 
 	companion object {

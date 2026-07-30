@@ -142,16 +142,62 @@ the answer depends on the schedule rather than on the data. LM has no such knob.
 Uncertainties are checked for calibration, not just for being small: with sensor
 noise applied, the true lengths must fall within 2σ of the estimate.
 
+## Height
+
+`scaleEachStep` decides whether height is solved for, matching what the setting
+already means for the greedy path: set, and height is pinned to the target;
+clear, and it is estimated.
+
+The greedy path estimates it in the block guarded by `!scaleEachStep`, which
+tries one step up and one step down in height and keeps whichever scored better
+— a one-dimensional line search interleaved with, but separate from, the bone
+search. Here height is one more column of the Jacobian, as `θ = ln(height)`, so
+it can trade off against bone lengths inside a single step and the coupling
+between them appears in the covariance instead of being invisible.
+
+Each residual evaluation rescales the recording by `1/height` before measuring.
+The offsets live in normalised units where the user is 1 unit tall, so it is the
+recording that moves to meet them.
+
+Recovering it is tested the same way the lengths are. The synthetic recording is
+generated unscaled, so the correct height parameter is exactly 1.0 by
+construction:
+
+| | thigh | shin | height |
+| --- | --- | --- | --- |
+| start | 0.36 | 0.52 | 1.15 |
+| **solved** | **0.4199** | **0.4601** | **1.0000 ± 0.0006** |
+| truth | 0.42 | 0.46 | 1.00 |
+
+The obvious worry is that height is redundant with a uniform scale-up of every
+bone. It is not, and that is asserted rather than assumed: the recording's
+tracker positions are scaled by `1/height` while the bones are not, so the two
+do not cancel. Freeing height moves the condition number from 199 to 249 — an
+extra free parameter always costs something, but a redundant one would cost
+orders of magnitude.
+
 ## What this does not do
 
-- **Estimate height.** Held at the target, which matches the greedy path under
-  the default `scaleEachStep = true`. With that setting off it is a behaviour
-  change and the solver logs that it is. Adding height is one more parameter and
-  is deliberately deferred until the lengths have been compared on real
-  recordings.
 - **Surface uncertainty in the UI.** `AutoBoneResults.solution` carries it and
-  `AutoBoneSolution.poorlyDetermined()` is the query a UI wants; putting it on
-  screen needs a solarxr schema change and GUI work, which is its own change.
+  `AutoBoneSolution.poorlyDetermined()` is the query a UI wants. Putting it on
+  screen is blocked outside this repository: `solarxr-protocol` is the upstream
+  `SlimeVR/SolarXR-Protocol`, so the schema change cannot land here. The delta
+  is one backward-compatible optional field —
+
+  ```
+  table SkeletonPart {
+      bone: SkeletonBone;
+      value: float;
+      /// 1σ uncertainty on `value`, in metres, when the estimate came from a
+      /// solver that produces one. Null when unavailable.
+      sigma: float = null;
+  }
+  ```
+
+  — plus regenerated bindings, a submodule bump, and GUI work to render it.
+  `RPCAutoBoneHandler` already builds this vector, at the
+  `createAdjustedSkeletonPartsVector` call, so the server side is a one-line
+  change once the field exists.
 - **Retire `initialAdjustRate` / `adjustRateDecay`.** Issue #7 puts that after
   the new path is trusted, and it is not trusted until it has been run against
   the greedy path on real recordings.

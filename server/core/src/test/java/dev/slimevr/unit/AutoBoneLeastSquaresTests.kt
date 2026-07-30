@@ -197,8 +197,8 @@ class AutoBoneLeastSquaresTests {
 
 		// The worst-determined direction must be the thigh/shin difference:
 		// components of opposite sign and comparable size.
-		val thigh = straightWorst.components.getValue(SkeletonConfigOffsets.UPPER_LEG)
-		val shin = straightWorst.components.getValue(SkeletonConfigOffsets.LOWER_LEG)
+		val thigh = straightWorst.components.getValue(SkeletonConfigOffsets.UPPER_LEG.configKey)
+		val shin = straightWorst.components.getValue(SkeletonConfigOffsets.LOWER_LEG.configKey)
 		assertTrue(
 			thigh * shin < 0.0,
 			"the worst-determined direction should be thigh minus shin, got $thigh and $shin",
@@ -348,6 +348,84 @@ class AutoBoneLeastSquaresTests {
 		assertTrue(objective.meanStepError(truth) < 1e-4)
 	}
 
+	/**
+	 * Height solved jointly with the bone lengths, rather than by the greedy
+	 * path's separate one-dimensional line search.
+	 *
+	 * The recording is generated at scale 1, so the correct height parameter is
+	 * exactly 1.0 by construction and starting elsewhere is a 15% error in how
+	 * large the user is. Both the height and the two bone lengths have to come
+	 * back, which is the part a separate line search cannot promise: it cannot
+	 * trade one against the other within a step.
+	 */
+	@Test
+	fun recoversHeightJointlyWithBoneLengths() {
+		val frames = record(::bentKneePose)
+		val objective = mkObjective(mkStep(frames), frames, estimateHeight = true)
+
+		val start = objective.toParameters(
+			linkedMapOf(
+				SkeletonConfigOffsets.UPPER_LEG to 0.36f,
+				SkeletonConfigOffsets.LOWER_LEG to 0.52f,
+			),
+			height = 1.15f,
+		)
+
+		val solution = AutoBoneLevenbergMarquardt.solve(objective, start, mkConfig())
+		println(solution.report())
+
+		val height = solution.height
+		assertTrue(height != null, "height was solved for but not reported")
+		assertTrue(
+			abs(height!! - 1f) < 0.01f,
+			"the recording was generated at scale 1, so height should return to 1.0; got $height from a start of 1.15",
+		)
+		for ((offset, expected) in trueLengths) {
+			val got = solution.lengths.getValue(offset)
+			assertTrue(
+				abs(got - expected) < 0.01f,
+				"$offset: expected ${expected}m, solved ${got}m with height free",
+			)
+		}
+	}
+
+	/**
+	 * Freeing height must not quietly make the problem degenerate.
+	 *
+	 * A uniform scale-up of every bone paired with a matching change in height
+	 * is the obvious candidate for a direction the data cannot see, and if it
+	 * were one the covariance would be meaningless rather than merely wide.
+	 * That it is not is a property of this objective worth pinning: the
+	 * recording's tracker positions are scaled by `1/height` while the bones
+	 * are not, so the two do not cancel.
+	 */
+	@Test
+	fun freeingHeightDoesNotMakeTheProblemSingular() {
+		val frames = record(::bentKneePose, sensorNoiseRad)
+		val fixed = mkObjective(mkStep(frames), frames, estimateHeight = false)
+		val free = mkObjective(mkStep(frames), frames, estimateHeight = true)
+
+		val fixedSolution = AutoBoneLevenbergMarquardt.solve(fixed, fixed.toParameters(trueLengths), mkConfig())
+		val freeSolution = AutoBoneLevenbergMarquardt.solve(free, free.toParameters(trueLengths, height = 1f), mkConfig())
+
+		println("height fixed: " + fixedSolution.report())
+		println("height free:  " + freeSolution.report())
+
+		assertTrue(
+			freeSolution.conditionNumber.isFinite(),
+			"freeing height made JᵀJ singular (condition ${freeSolution.conditionNumber}); the " +
+				"height parameter is redundant with the bone lengths",
+		)
+		// Wider than with height pinned -- an extra free parameter always costs
+		// something -- but not by orders of magnitude, which is what a
+		// near-degenerate direction would look like.
+		assertTrue(
+			freeSolution.conditionNumber < fixedSolution.conditionNumber * 100.0,
+			"condition went from ${fixedSolution.conditionNumber} to ${freeSolution.conditionNumber} " +
+				"when height was freed, which is the signature of a redundant parameter",
+		)
+	}
+
 	// #region harness
 
 	/** Per-tracker rotation noise for the covariance tests, about 0.6°. */
@@ -430,7 +508,11 @@ class AutoBoneLeastSquaresTests {
 		data = AutoBoneStep(targetHmdHeight = nominalHeight),
 	)
 
-	private fun mkObjective(step: PoseFrameStep<AutoBoneStep>, frames: PoseFrames): AutoBoneObjective {
+	private fun mkObjective(
+		step: PoseFrameStep<AutoBoneStep>,
+		frames: PoseFrames,
+		estimateHeight: Boolean = false,
+	): AutoBoneObjective {
 		val config = mkConfig()
 		return AutoBoneObjective(
 			step = step,
@@ -443,6 +525,10 @@ class AutoBoneLeastSquaresTests {
 			),
 			terms = AutoBoneObjective.enabledTerms(config, AutoBoneErrorSet()),
 			heightConstraintWeight = config.lmHeightConstraintWeight,
+			estimateHeight = estimateHeight,
+			// The recording is generated unscaled, so 1.0 is "leave it alone"
+			// and the true height parameter is exactly 1.0.
+			fixedHeight = 1f,
 		)
 	}
 

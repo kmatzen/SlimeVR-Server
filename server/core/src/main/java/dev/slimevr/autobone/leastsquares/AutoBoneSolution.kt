@@ -51,6 +51,10 @@ class AutoBoneSolution(
 	val correlation: Array<DoubleArray>?,
 	/** Worst-determined parameter combination, or null if unavailable. */
 	val worstDirection: Direction?,
+	/** Solved user height, or null when it was held fixed. */
+	val height: Float?,
+	/** 1σ on [height] in metres, or null when it was held fixed. */
+	val heightSigma: Float?,
 	/** Ratio of the largest to smallest eigenvalue of `JᵀJ`. */
 	val conditionNumber: Double,
 	val residualVariance: Double,
@@ -71,16 +75,21 @@ class AutoBoneSolution(
 	 * length is right and the split is not.
 	 */
 	class Direction(
-		val components: LinkedHashMap<SkeletonConfigOffsets, Double>,
+		/**
+		 * Keyed by parameter name rather than by [SkeletonConfigOffsets],
+		 * because height is a parameter too and is not a bone. Bones use their
+		 * `configKey`; height uses [HEIGHT].
+		 */
+		val components: LinkedHashMap<String, Double>,
 		/** 1σ along this direction, in log units, i.e. relative. */
 		val sigma: Double,
 	) {
-		/** The bones carrying this direction, largest contribution first. */
+		/** The parameters carrying this direction, largest contribution first. */
 		fun describe(limit: Int = 3): String = components.entries
 			.sortedByDescending { abs(it.value) }
 			.take(limit)
-			.joinToString(", ") { (offset, weight) ->
-				"${if (weight < 0) "−" else "+"}${StringUtils.prettyNumber(abs(weight).toFloat(), 2)}·${offset.configKey}"
+			.joinToString(", ") { (name, weight) ->
+				"${if (weight < 0) "−" else "+"}${StringUtils.prettyNumber(abs(weight).toFloat(), 2)}·$name"
 			}
 	}
 
@@ -92,6 +101,10 @@ class AutoBoneSolution(
 		relativeSigma = relativeSigma,
 		correlation = correlation,
 		worstDirection = worstDirection,
+		// Height is deliberately not scaled: it is already in metres, and it is
+		// the very quantity the normalised lengths are being scaled *by*.
+		height = height,
+		heightSigma = heightSigma,
 		conditionNumber = conditionNumber,
 		residualVariance = residualVariance,
 		rms = rms,
@@ -131,6 +144,15 @@ class AutoBoneSolution(
 				),
 			)
 		}
+		if (height != null) {
+			append(
+				"  %-22s %s ± %s cm\n".format(
+					HEIGHT,
+					StringUtils.prettyNumber(height * 100f, 2),
+					StringUtils.prettyNumber((heightSigma ?: 0f) * 100f, 2),
+				),
+			)
+		}
 		worstDirection?.let {
 			append(
 				"  worst-determined combination: ± ${StringUtils.prettyNumber(it.sigma.toFloat() * 100f, 1)}% " +
@@ -140,6 +162,9 @@ class AutoBoneSolution(
 	}
 
 	companion object {
+		/** Parameter name used for the solved height, which is not a bone. */
+		const val HEIGHT = "height"
+
 		/**
 		 * Builds a solution from the log-space covariance.
 		 *
@@ -150,6 +175,8 @@ class AutoBoneSolution(
 		fun from(
 			offsets: List<SkeletonConfigOffsets>,
 			parameters: DoubleArray,
+			/** Index of the height parameter, or -1 when it was held fixed. */
+			heightIndex: Int,
 			covariance: Array<DoubleArray>?,
 			worstDirection: Direction?,
 			conditionNumber: Double,
@@ -164,20 +191,28 @@ class AutoBoneSolution(
 			val sigma = LinkedHashMap<SkeletonConfigOffsets, Float>(offsets.size)
 			val relative = LinkedHashMap<SkeletonConfigOffsets, Float>(offsets.size)
 
+			/** log-space σ for parameter [i], or NaN when unavailable. */
+			fun logSigmaAt(i: Int): Double = covariance?.get(i)?.get(i)?.let { if (it > 0.0) sqrt(it) else 0.0 } ?: Double.NaN
+
 			for (i in offsets.indices) {
 				val length = kotlin.math.exp(parameters[i])
 				lengths[offsets[i]] = length.toFloat()
 
 				// Variance is in log space, so its square root is already a
 				// relative uncertainty; the delta method turns it into metres.
-				val logSigma = covariance?.get(i)?.get(i)?.let { if (it > 0.0) sqrt(it) else 0.0 } ?: Double.NaN
+				val logSigma = logSigmaAt(i)
 				relative[offsets[i]] = logSigma.toFloat()
 				sigma[offsets[i]] = (length * logSigma).toFloat()
 			}
 
+			// Height, if it was solved for, goes through exactly the same delta
+			// method -- it is one more log-parameter, not a special case.
+			val height = if (heightIndex >= 0) kotlin.math.exp(parameters[heightIndex]) else null
+			val heightSigma = height?.let { (it * logSigmaAt(heightIndex)).toFloat() }
+
 			val correlation = covariance?.let { cov ->
-				Array(offsets.size) { i ->
-					DoubleArray(offsets.size) { j ->
+				Array(cov.size) { i ->
+					DoubleArray(cov.size) { j ->
 						val denom = sqrt(cov[i][i] * cov[j][j])
 						if (denom > 0.0) cov[i][j] / denom else 0.0
 					}
@@ -190,6 +225,8 @@ class AutoBoneSolution(
 				relativeSigma = relative,
 				correlation = correlation,
 				worstDirection = worstDirection,
+				height = height?.toFloat(),
+				heightSigma = heightSigma,
 				conditionNumber = conditionNumber,
 				residualVariance = residualVariance,
 				rms = rms,

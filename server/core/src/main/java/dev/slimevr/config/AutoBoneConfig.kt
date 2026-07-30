@@ -17,6 +17,14 @@ class AutoBoneConfig {
 	var positionOffsetErrorFactor = 0.0f
 	var calcInitError = false
 	var randomizeFrameOrder = true
+
+	/**
+	 * Hold height at the target rather than estimating it.
+	 *
+	 * Both optimisers honour this, by different means: the greedy path skips
+	 * its height line search, and the Levenberg-Marquardt path drops the height
+	 * parameter from the solve.
+	 */
 	var scaleEachStep = true
 	var sampleCount = 1500
 	var sampleRateMs = 20L

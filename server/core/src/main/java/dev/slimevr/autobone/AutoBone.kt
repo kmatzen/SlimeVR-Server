@@ -328,24 +328,24 @@ class AutoBone(private val server: VRServer) {
 	 * [offsets], leaving [processFrames] to scale and return it exactly as it
 	 * does for the greedy path.
 	 *
-	 * Height is held at the target here. With the default `scaleEachStep = true`
-	 * the greedy path does the same, so this is not a behaviour change for
-	 * default config; with `scaleEachStep = false` it is, and it says so rather
-	 * than quietly ignoring the setting. Estimating height jointly is a matter
-	 * of adding one parameter and is left until the bone lengths themselves
-	 * have been compared against the greedy path on real recordings.
+	 * `scaleEachStep` decides whether height is solved for, matching what the
+	 * setting already means for the greedy path: when it is set, height is
+	 * pinned to the target; when it is clear, it is estimated.
+	 *
+	 * The greedy path estimates it by the block in [step] guarded by
+	 * `!scaleEachStep`, which tries one step up and one step down in height and
+	 * keeps whichever scored better -- a one-dimensional line search
+	 * interleaved with, but separate from, the bone search. Here height is one
+	 * more column of the Jacobian, so it can trade off against bone lengths
+	 * within a single step and the coupling between them shows up in the
+	 * covariance instead of being invisible.
 	 */
 	private fun solveLeastSquares(
 		step: PoseFrameStep<AutoBoneStep>,
 		config: AutoBoneConfig,
 		epochCallback: Consumer<Epoch>? = null,
 	): AutoBoneSolution {
-		if (!config.scaleEachStep) {
-			LogManager.warning(
-				"[AutoBone] scaleEachStep is off, but the Levenberg-Marquardt path holds " +
-					"height at the target. Height will not be estimated.",
-			)
-		}
+		val estimateHeight = !config.scaleEachStep
 
 		// Only bones that actually have a length to adjust; loadConfigValues
 		// drops any whose offset is non-positive.
@@ -369,14 +369,18 @@ class AutoBone(private val server: VRServer) {
 			framePairs = framePairs,
 			terms = terms,
 			heightConstraintWeight = config.lmHeightConstraintWeight,
+			estimateHeight = estimateHeight,
+			fixedHeight = estimatedHeight,
 		)
 
 		LogManager.info(
-			"[AutoBone/LM] ${solveOffsets.size} parameters, ${objective.residualCount} residuals " +
+			"[AutoBone/LM] ${objective.parameterCount} parameters " +
+				"(${solveOffsets.size} bones${if (estimateHeight) " + height" else ", height fixed"}), " +
+				"${objective.residualCount} residuals " +
 				"(${framePairs.size} frame pairs x ${terms.size} terms: ${terms.joinToString { it.name }})",
 		)
 
-		val initial = objective.toParameters(offsets)
+		val initial = objective.toParameters(offsets, estimatedHeight)
 		val solution = AutoBoneLevenbergMarquardt.solve(
 			objective = objective,
 			initialParameters = initial,
@@ -399,6 +403,9 @@ class AutoBone(private val server: VRServer) {
 		)
 
 		offsets.putAll(solution.lengths)
+		// processFrames scales the normalised offsets by this at the end, so a
+		// solved height has to land here for it to reach the result at all.
+		solution.height?.let { estimatedHeight = it }
 
 		// processFrames gates on this, so it has to describe the solution that
 		// was actually reached -- and on the same scalar the greedy path
@@ -406,7 +413,9 @@ class AutoBone(private val server: VRServer) {
 		// flag.
 		step.data.errorStats.reset()
 		step.data.errorStats.addValue(
-			objective.meanStepError(objective.toParameters(solution.lengths)).toFloat(),
+			objective.meanStepError(
+				objective.toParameters(solution.lengths, solution.height ?: estimatedHeight),
+			).toFloat(),
 		)
 
 		LogManager.info(solution.report())
