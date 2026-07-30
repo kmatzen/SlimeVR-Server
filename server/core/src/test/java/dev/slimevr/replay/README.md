@@ -18,6 +18,7 @@ argued about with numbers instead of impressions.
 | `SyntheticMotion.kt` | deterministic tracker motion — `stand`, `squat`, `walk-in-place`, `lean` |
 | `SkeletonReplayTest.kt` | drives the pipeline, computes metrics, gates on the baseline |
 | `TimeSkewReplayTest.kt` | what per-tracker clock skew costs, and how much `TimeAlignment` recovers |
+| `IKSolverReplayTest.kt` | what the IK solver does, now that it is called at all |
 | `CorpusRecording.kt` | discovers committed `.pfr` recordings and validates their capture metadata |
 | `CorpusReplay.kt` | drives a recording through the pipeline into the same metrics |
 | `CorpusReplayTest.kt` | gates the corpus on the baseline, and proves the `.pfr` path end to end |
@@ -96,6 +97,49 @@ not scale the output, it changes which frames count as planted at all.
 
 That is why `rate_hz` is a required sidecar field and a `.pfr` without a
 sidecar is a hard failure rather than a file replayed at a guessed rate.
+
+## The IK solver, and what turning it on is worth
+
+`IKSolver.solve()` had no call site — not here, not in SlimeVR upstream, and
+never at any point in either history. The introducing commit (upstream
+`0a08d574`, "Positional tracker support (#920)", 31 Oct 2025) added the field,
+the chain builder, the `USE_POSITION` wiring and the reset path, and no caller.
+`IKSolver.enabled` is read only by the early return at the top of `solve()`, so
+the setting could not do anything. See issue #4.
+
+It is now called from `HumanSkeleton.updatePose()`, and `USE_POSITION` defaults
+to **false** — it shipped as true while doing nothing, so leaving it on would
+change every existing user's pose on upgrade using a path that has never run.
+
+Two measured facts, both pinned by `IKSolverReplayTest`:
+
+- **On a rotation-only tracker set it changes nothing, and cannot.**
+  `buildChains` discards the root chain unless some chain has a *tail*
+  constraint — its own comment is "check if there is any constraints (other
+  than the head) in the model" — and a normal SlimeVR set has exactly one
+  positional tracker, the headset, which *is* the root. So `rootChain` is null
+  and `solve()` returns on its first line. Turning the setting on cannot affect
+  the common configuration.
+- **Given a positional tracker below the root it does a great deal.** Adding a
+  left-foot tracker that reports position, on `squat`:
+
+  | metric | off | on |
+  | --- | --- | --- |
+  | `foot_slide_m_per_sec` | 0.050289 | 0.022453 |
+  | `floor_clip_mean_m` | 0.141896 | 0.000060 |
+  | `floor_clip_max_m` | 0.233865 | 0.000060 |
+  | `floor_clip_fraction` | 0.997500 | 0.002500 |
+  | `foot_height_disagreement_m` | 0.000000 | 0.016111 |
+
+  Floor penetration essentially eliminated, foot slide down 55%. The one metric
+  that worsens is the feet disagreeing about the floor, which is expected when
+  only *one* foot has a positional constraint pulling it.
+
+**Disable the leg corrections when comparing anything here.** The first version
+of this test left them on, and on clean synthetic input they drive every metric
+to exactly zero — so it simultaneously reported that the solver changed nothing
+and that it changed everything, both meaningless. Same trap as the `+legtweaks`
+baseline rows.
 
 ## Measure the computed trackers, not the skeleton bones
 

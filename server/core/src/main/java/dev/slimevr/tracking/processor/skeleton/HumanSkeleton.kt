@@ -571,6 +571,19 @@ class HumanSkeleton(
 
 		updateTransforms()
 		updateBones()
+
+		// Forward kinematics has placed every bone from the tracker rotations.
+		// The solver's job is to bend that result back towards the trackers
+		// that also report a *position*, so it has to run after the chain
+		// exists and before anything consumes the pose.
+		//
+		// This call did not exist before. `IKSolver` was constructed, had its
+		// chains built, its `enabled` flag wired to USE_POSITION and its
+		// offsets reset -- and was never solved, here or in SlimeVR upstream,
+		// where the string has been absent since positional tracker support
+		// merged in 0a08d574 (31 Oct 2025). See issue #4.
+		ikSolver.solve()
+
 		if (enforceConstraints) {
 			// TODO re-enable toggling correctConstraints once
 			// https://github.com/SlimeVR/SlimeVR-Server/issues/1297 is solved

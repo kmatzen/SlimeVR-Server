@@ -15,7 +15,12 @@ public enum SkeletonConfigToggles {
 	TOE_SNAP(8, "Toe Snap", "toeSnap", false),
 	FOOT_PLANT(9, "Foot Plant", "footPlant", true),
 	SELF_LOCALIZATION(10, "Self Localization", "selfLocalization", false),
-	USE_POSITION(11, "Use Position", "usePosition", true),
+	// Default false, deliberately. This shipped as true while the solver it
+	// gates was never invoked, so "on" has always meant "does nothing". Now
+	// that it is wired up, leaving the default at true would silently change
+	// the pose of every existing user on upgrade, using a code path that has
+	// never run. Off until it has been measured on real recordings.
+	USE_POSITION(11, "Use Position", "usePosition", false),
 	ENFORCE_CONSTRAINTS(12, "Enforce Constraints", "enforceConstraints", true),
 	CORRECT_CONSTRAINTS(13, "Correct Constraints", "correctConstraints", true),;
 
