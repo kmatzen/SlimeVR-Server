@@ -152,7 +152,7 @@ class CorpusCapture(private val server: VRServer) {
 			frames = frames.maxFrameCount,
 			trackers = frames.frameHolders.size,
 			derived = derived,
-			warnings = warningsFor(derived),
+			warnings = warningsFor(derived) + timestampWarnings(frames),
 		)
 	}
 
@@ -235,6 +235,40 @@ class CorpusCapture(private val server: VRServer) {
 			imuTypeBreakdown = breakdown,
 			offsets = offsets,
 			stayAligned = stayAligned,
+		)
+	}
+
+	/**
+	 * Whether the recording carries the sample timestamps time alignment needs.
+	 *
+	 * The same class of gap as a missing `imu_type`, and it fails the same way:
+	 * a recording with no timestamps replays with every tracker apparently
+	 * sampled at the same instant, `TimeAlignment` finds fewer than two
+	 * participants, and the pass returns having touched nothing. Every metric is
+	 * still produced.
+	 *
+	 * Unlike `imu_type` this cannot be repaired by editing the sidecar
+	 * afterwards, because the data was never written down -- which is why it is
+	 * reported while the session is still running.
+	 */
+	private fun timestampWarnings(frames: PoseFrames): List<String> {
+		val timestamped = frames.frameHolders.count { holder ->
+			holder.frames.any { it?.tryGetSampleServerMicros() != null }
+		}
+		if (timestamped == frames.frameHolders.size) return emptyList()
+
+		val none = timestamped == 0
+		return listOf(
+			if (none) {
+				"No tracker reported sample timestamps, so this recording carries " +
+					"none. Time alignment will be inert for the whole replay. The " +
+					"firmware must advertise PROTOCOL_SAMPLE_TIMESTAMPS -- this is " +
+					"not recoverable after the session."
+			} else {
+				"$timestamped of ${frames.frameHolders.size} trackers reported sample " +
+					"timestamps. The rest replay as untimestamped and take no part in " +
+					"time alignment, exactly as they would live."
+			},
 		)
 	}
 

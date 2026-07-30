@@ -16,10 +16,28 @@ class TrackerFramesPlayer(
 	val imuType: IMUType? = null,
 ) {
 
+	/**
+	 * Earliest sample timestamp anywhere in the recording, or null when nothing
+	 * in it is timestamped.
+	 *
+	 * Every replayed timestamp is expressed relative to this. The recorded
+	 * values are the capture machine's clock, and only their *differences* carry
+	 * meaning -- the spread between trackers at one instant, and the interval
+	 * between one tracker's consecutive samples. Rebasing keeps both exactly
+	 * while making a replay independent of when and where it was captured.
+	 *
+	 * Taken across all trackers rather than per tracker, because a per-tracker
+	 * origin would zero the very between-tracker skew this exists to preserve.
+	 */
+	val timestampOrigin: Long? = frameHolders
+		.flatMap { holder -> holder.frames.asSequence().mapNotNull { it?.sampleServerMicros }.asIterable() }
+		.minOrNull()
+
 	val playerTrackers: Array<PlayerTracker> = frameHolders.map { trackerFrames ->
 		PlayerTracker(
 			trackerFrames,
 			trackerFrames.toTracker(imuType),
+			timestampOrigin = timestampOrigin,
 		)
 	}.toTypedArray()
 
