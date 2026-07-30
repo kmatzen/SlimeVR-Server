@@ -104,6 +104,7 @@ class LegTweaks(private val skeleton: HumanSkeleton) {
 
 	// config
 	private var config: LegTweaksConfig? = null
+	private var projectToJointSpace = false
 
 	// leg data
 	private var leftFootPosition = Vector3.NULL
@@ -192,6 +193,51 @@ class LegTweaks(private val skeleton: HumanSkeleton) {
 			skeleton.humanPoseManager.getToggle(SkeletonConfigToggles.TOE_SNAP)
 		footPlantEnabled =
 			skeleton.humanPoseManager.getToggle(SkeletonConfigToggles.FOOT_PLANT)
+		projectToJointSpace = config!!.projectToJointSpace
+	}
+
+	/**
+	 * Replace the corrected leg positions with the closest ones the skeleton can
+	 * actually reach.
+	 *
+	 * The reference lengths are read from the bone tree, which still holds the
+	 * uncorrected forward-kinematic pose -- the corrections are written into the
+	 * computed trackers and never back into the bones. So the lengths to preserve
+	 * are available on the same frame, exactly, with nothing cached and nothing
+	 * to drift.
+	 *
+	 * The corrected hip is taken as the root rather than projected. It is the top
+	 * of the leg chain, and the segments above it are not what these corrections
+	 * deform.
+	 */
+	private fun projectLegsOntoSkeleton() {
+		val hipReference = skeleton.hipTrackerBone.getPosition()
+
+		val left = JointSpaceProjection.project(
+			hip = hipPosition,
+			ankleTarget = leftFootPosition,
+			kneeHint = leftKneePosition,
+			upperLength = (skeleton.leftKneeTrackerBone.getPosition() - hipReference).len(),
+			lowerLength = (
+				skeleton.leftFootTrackerBone.getPosition() -
+					skeleton.leftKneeTrackerBone.getPosition()
+				).len(),
+		)
+		leftKneePosition = left.knee
+		leftFootPosition = left.ankle
+
+		val right = JointSpaceProjection.project(
+			hip = hipPosition,
+			ankleTarget = rightFootPosition,
+			kneeHint = rightKneePosition,
+			upperLength = (skeleton.rightKneeTrackerBone.getPosition() - hipReference).len(),
+			lowerLength = (
+				skeleton.rightFootTrackerBone.getPosition() -
+					skeleton.rightKneeTrackerBone.getPosition()
+				).len(),
+		)
+		rightKneePosition = right.knee
+		rightFootPosition = right.ankle
 	}
 
 	// tweak the position of the legs based on data from the last frames
@@ -216,6 +262,10 @@ class LegTweaks(private val skeleton: HumanSkeleton) {
 
 		// calculate the correction for the knees
 		if (initialized) solveLowerBody()
+
+		// re-solve the legs in joint space so the corrections above cannot have
+		// changed a segment's length
+		if (projectToJointSpace) projectLegsOntoSkeleton()
 
 		// populate the corrected data into the current frame
 		bufferHead
