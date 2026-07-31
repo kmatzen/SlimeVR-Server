@@ -350,6 +350,18 @@ class CorpusCapture(private val server: VRServer) {
 				"${capture.accel.summary()}; ${capture.gyro.summary()}. The .imu " +
 				"file marks them, so it is still usable, but a re-fusion run " +
 				"cannot cross a gap."
+
+			// Called out separately because it is the one cause the wearer can
+			// do nothing about and the one that means the tracker itself could
+			// not keep up. It is also the only cause that would have been
+			// invisible before kmatzen/SlimeVR-Tracker-ESP#26.
+			val fifo = capture.accel.droppedInFifo + capture.gyro.droppedInFifo
+			if (fifo > 0) {
+				warnings += "$fifo of those were discarded by the sensor's own FIFO " +
+					"before the firmware saw them, which means the tracker's drain " +
+					"loop could not keep up. Not a network problem, and not fixable " +
+					"by recapturing on a quieter WiFi channel."
+			}
 		}
 
 		return warnings

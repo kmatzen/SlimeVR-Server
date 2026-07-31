@@ -78,6 +78,7 @@ class RawSampleCollector {
 		baseMicros: Long,
 		values: ShortArray,
 		count: Int,
+		fifoDroppedTotal: Int = 0,
 	) {
 		if (!isCapturing) return
 		val capture = captures[Key(deviceId, sensorId)]
@@ -85,7 +86,14 @@ class RawSampleCollector {
 			unscalableBatches++
 			return
 		}
-		capture.stream(kind).accept(sequence, droppedTotal, baseMicros, values, count)
+		capture.stream(kind).accept(
+			sequence,
+			droppedTotal,
+			baseMicros,
+			values,
+			count,
+			fifoDroppedTotal,
+		)
 	}
 
 	/** Every sensor that produced samples, in a stable order. */

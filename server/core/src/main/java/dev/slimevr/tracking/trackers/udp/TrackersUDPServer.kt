@@ -529,6 +529,7 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 						packet.baseNominalMicros,
 						packet.samples,
 						packet.sampleCount,
+						packet.fifoDropped.toInt(),
 					)
 				}
 			}

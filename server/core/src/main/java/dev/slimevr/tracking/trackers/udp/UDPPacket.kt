@@ -501,6 +501,16 @@ data class UDPPacket30RawSampleBatch(
 	var sequence: Long = 0,
 	/** Cumulative samples the tracker discarded to buffer overrun. */
 	var dropped: Long = 0,
+	/**
+	 * Cumulative samples the sensor's hardware FIFO discarded before the
+	 * firmware saw them.
+	 *
+	 * Separate from [dropped] because the causes are: the network path could not
+	 * keep up, versus the sensor drain loop could not. It is also the only hole
+	 * nothing else can see -- the batch sequence stays unbroken across one, and
+	 * the nominal clock closes over it.
+	 */
+	var fifoDropped: Long = 0,
 	var baseNominalMicros: Long = 0,
 	var realMicros: Long = 0,
 	var sampleCount: Int = 0,
@@ -531,6 +541,7 @@ data class UDPPacket30RawSampleBatch(
 				kind = buf.get().toInt() and 0xFF
 				sequence = buf.int.toLong() and 0xFFFFFFFFL
 				dropped = buf.int.toLong() and 0xFFFFFFFFL
+				fifoDropped = buf.int.toLong() and 0xFFFFFFFFL
 				baseNominalMicros = buf.long
 				realMicros = buf.int.toLong() and 0xFFFFFFFFL
 				val declared = buf.short.toInt() and 0xFFFF
