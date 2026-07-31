@@ -21,8 +21,26 @@
 # The consequence is worth knowing when reading a diff here: these zero lines
 # gate "the corrections still work at all", and any nonzero value is a
 # regression. They cannot express "slightly worse", because there is no headroom
-# left on synthetic input. Graded measurement needs recordings with real sensor
-# noise and drift, where the residual is not zero -- see issue #15.
+# left on synthetic input.
+#
+# `segment_deformation_*` is the exception, and it is why those keys are here.
+# Every other metric asks whether the output is in the right *place*; these ask
+# whether it is a body. A skeleton has fixed segment lengths and forward
+# kinematics cannot violate them -- which is why the plain-solver rows read
+# exactly 0.000000, and that is the metric's own calibration rather than a
+# result. `LegTweaks` translates the ankle, the knee and the hip independently,
+# and independent translations of a segment's endpoints change its length.
+#
+# So the corrections drive slide and clip to zero *by* deforming the skeleton,
+# and the frames where those read zero are the frames where this reads largest:
+# 0.161902 m on `squat`, 11.4% of a segment. The residual did not go away when
+# the other columns hit zero, it moved into a channel nobody was measuring.
+#
+# That makes these the one set of keys on synthetic input with headroom to
+# express degradation rather than only breakage. A change to the leg path that
+# made it meaningfully worse but still nominally functional moves them.
+# Everything else still needs recordings with real sensor noise and drift --
+# see issue #15 -- and this narrows what those recordings are needed *for*.
 #
 # Regenerating this file is how a real regression gets blessed as expected
 # behaviour. Read the diff first.
@@ -37,6 +55,9 @@ stand/floor_clip_max_m                           0.000000     0.000100
 stand/floor_clip_fraction                        0.000000     0.000100
 stand/foot_height_disagreement_m                 0.000000     0.000100
 stand/height_m                                   1.580000     0.031600
+stand/segment_deformation_mean_m                 0.000000     0.000100
+stand/segment_deformation_max_m                  0.000000     0.000100
+stand/segment_deformation_fraction               0.000000     0.000100
 stand+legtweaks/foot_slide_m_per_sec             0.000000     0.000100
 stand+legtweaks/foot_slide_total_m               0.000000     0.000100
 stand+legtweaks/floor_clip_mean_m                0.000000     0.000100
@@ -44,6 +65,9 @@ stand+legtweaks/floor_clip_max_m                 0.000000     0.000100
 stand+legtweaks/floor_clip_fraction              0.000000     0.000100
 stand+legtweaks/foot_height_disagreement_m       0.000000     0.000100
 stand+legtweaks/height_m                         1.580000     0.031600
+stand+legtweaks/segment_deformation_mean_m       0.000000     0.000100
+stand+legtweaks/segment_deformation_max_m        0.000000     0.000100
+stand+legtweaks/segment_deformation_fraction     0.000000     0.000100
 squat/foot_slide_m_per_sec                       0.050289     0.001006
 squat/foot_slide_total_m                         0.402317     0.008046
 squat/floor_clip_mean_m                          0.141896     0.002838
@@ -51,6 +75,9 @@ squat/floor_clip_max_m                           0.233865     0.004677
 squat/floor_clip_fraction                        0.997500     0.019950
 squat/foot_height_disagreement_m                 0.000000     0.000100
 squat/height_m                                   1.580000     0.031600
+squat/segment_deformation_mean_m                 0.000000     0.000100
+squat/segment_deformation_max_m                  0.000000     0.000100
+squat/segment_deformation_fraction               0.000000     0.000100
 squat+legtweaks/foot_slide_m_per_sec             0.000000     0.000100
 squat+legtweaks/foot_slide_total_m               0.000000     0.000100
 squat+legtweaks/floor_clip_mean_m                0.000000     0.000100
@@ -58,6 +85,9 @@ squat+legtweaks/floor_clip_max_m                 0.000000     0.000100
 squat+legtweaks/floor_clip_fraction              0.000000     0.000100
 squat+legtweaks/foot_height_disagreement_m       0.000000     0.000100
 squat+legtweaks/height_m                         1.580000     0.031600
+squat+legtweaks/segment_deformation_mean_m       0.053424     0.001068
+squat+legtweaks/segment_deformation_max_m        0.161902     0.003238
+squat+legtweaks/segment_deformation_fraction     0.113711     0.002274
 walk-in-place/foot_slide_m_per_sec               0.308897     0.006178
 walk-in-place/foot_slide_total_m                 1.754549     0.035091
 walk-in-place/floor_clip_mean_m                  0.000000     0.000100
@@ -65,6 +95,9 @@ walk-in-place/floor_clip_max_m                   0.000000     0.000100
 walk-in-place/floor_clip_fraction                0.000000     0.000100
 walk-in-place/foot_height_disagreement_m         0.019261     0.000385
 walk-in-place/height_m                           1.580000     0.031600
+walk-in-place/segment_deformation_mean_m         0.000000     0.000100
+walk-in-place/segment_deformation_max_m          0.000000     0.000100
+walk-in-place/segment_deformation_fraction       0.000000     0.000100
 walk-in-place+legtweaks/foot_slide_m_per_sec     0.000000     0.000100
 walk-in-place+legtweaks/foot_slide_total_m       0.000000     0.000100
 walk-in-place+legtweaks/floor_clip_mean_m        0.000000     0.000100
@@ -72,6 +105,9 @@ walk-in-place+legtweaks/floor_clip_max_m         0.000000     0.000100
 walk-in-place+legtweaks/floor_clip_fraction      0.000000     0.000100
 walk-in-place+legtweaks/foot_height_disagreement_m     0.019284     0.000386
 walk-in-place+legtweaks/height_m                 1.580000     0.031600
+walk-in-place+legtweaks/segment_deformation_mean_m     0.005777     0.000116
+walk-in-place+legtweaks/segment_deformation_max_m     0.050914     0.001018
+walk-in-place+legtweaks/segment_deformation_fraction     0.012295     0.000246
 lean/foot_slide_m_per_sec                        0.164599     0.003292
 lean/foot_slide_total_m                          1.316805     0.026336
 lean/floor_clip_mean_m                           0.000000     0.000100
@@ -79,6 +115,9 @@ lean/floor_clip_max_m                            0.000000     0.000100
 lean/floor_clip_fraction                         0.000000     0.000100
 lean/foot_height_disagreement_m                  0.000000     0.000100
 lean/height_m                                    1.580000     0.031600
+lean/segment_deformation_mean_m                  0.000000     0.000100
+lean/segment_deformation_max_m                   0.000000     0.000100
+lean/segment_deformation_fraction                0.000000     0.000100
 lean+legtweaks/foot_slide_m_per_sec              0.000000     0.000100
 lean+legtweaks/foot_slide_total_m                0.000000     0.000100
 lean+legtweaks/floor_clip_mean_m                 0.000000     0.000100
@@ -86,3 +125,6 @@ lean+legtweaks/floor_clip_max_m                  0.000000     0.000100
 lean+legtweaks/floor_clip_fraction               0.000000     0.000100
 lean+legtweaks/foot_height_disagreement_m        0.000000     0.000100
 lean+legtweaks/height_m                          1.580000     0.031600
+lean+legtweaks/segment_deformation_mean_m        0.009356     0.000187
+lean+legtweaks/segment_deformation_max_m         0.032851     0.000657
+lean+legtweaks/segment_deformation_fraction      0.019914     0.000398
