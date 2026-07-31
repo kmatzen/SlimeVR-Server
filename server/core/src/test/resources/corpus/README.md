@@ -257,14 +257,71 @@ that need settling once, in advance.
    is cheaper than what is already being paid, but five five-minute sessions is
    still on the order of 75 MB. The `.pfr` and `.meta` pair belongs in git
    regardless: it is what the suite gates on.
-2. **Whether an external position reference is in scope.** Issue #5's metric is
-   contact *timing* and issue #6's is vertical centre-of-mass error through
-   flight, and no IMU-only setup knows either. A lighthouse-tracked foot or a
-   pressure mat turns both from *self-consistent* into *correct*. The recordings
-   are worth having without one; the claims that can be made from them are
-   weaker, and it is better to know which before designing sessions around them.
+2. **Decided: there will be no external position reference.** No lighthouse and
+   no pressure mat. What that costs, and what to use instead, is
+   *"No lighthouse: what that costs"* below — it is less than it sounds, and
+   two of the substitutes are free.
 3. **The consent wording**, agreed before someone is standing in a room waiting
    for it. `record-corpus` will not proceed without it, which is the point.
+
+### No lighthouse: what that costs
+
+Recorded as a decision rather than a constraint, because it changes what some
+recordings can claim and nothing about whether they are worth making.
+
+**Most of the board never needed one.** The distinction is between metrics that
+are *internally consistent* and metrics that are *absolute*:
+
+- **Issue #4's segment deformation** is measured against the skeleton's own bone
+  lengths. Forward kinematics reads exactly `0.000000`, which is the metric's own
+  calibration. An external reference would not make it more true.
+- **Issue #3's yaw** is *relative* heading across a hinge, and the hinge
+  constraint is physics rather than a sensor: two segments joined by one must
+  agree about where its axis points, and their disagreement is the error. It is
+  also a head-to-head between two methods, which is relative by construction.
+
+So the one- and two-tracker tiers above are entirely unaffected, and those are
+the tiers that unblock the most per tracker.
+
+**Issues #5 and #6 are the ones that lose something.** Contact *timing* and
+vertical centre-of-mass error through flight are both absolute quantities, and
+an IMU-only rig knows neither.
+
+**Do not substitute the offline labeller for ground truth.** It is the obvious
+idea and it is wrong: measured against the same sequences, it scores F1 0.902
+where a causal trailing-stillness rule scores 0.935. Using a reference that is
+worse than the method under test bakes its error into every result and looks
+like a finding.
+
+Three substitutes, cheapest first:
+
+1. **For #6, flight time gives the apex analytically.** A centre of mass that
+   leaves and returns to the same height satisfies `h = g·t²/8`. Time takeoff and
+   landing and the true apex follows, with no position sensor anywhere. This is
+   not circular: a free centre of mass follows a ballistic arc whatever the
+   estimator does, so it is a legitimate reference for whether the estimator
+   reproduced it.
+
+2. **For both, try the raw accelerometer before buying anything.** A heel strike
+   is a sharp impact transient. Fused output smooths it; the raw counts in the
+   `.imu` sidecar do not, and at 120 Hz accelerometer / 240 Hz gyroscope a
+   transient resolves to roughly 8 ms — comfortably inside the 50 ms that issue
+   #5 names as the damaging threshold.
+
+   **Untested.** The sensor sits on the shin rather than the foot, so the impact
+   arrives through the leg and how sharp the edge remains is an open question. It
+   is answerable from a single walking capture, which is why it is first on the
+   list: if it holds, it replaces the pressure mat outright, and it is a
+   capability that did not exist before raw samples were recorded.
+
+3. **Failing that, video at 240 fps** resolves touchdown and liftoff to ±4 ms.
+   The hard part is synchronising it to the recording, not the frame rate.
+
+**What to write down if none of them work.** A recording with no timing reference
+still exercises the detector under real sensor noise, which synthetic motion
+cannot. The comparison simply becomes relative — method A against method B —
+rather than absolute. That is a weaker claim, and worth stating as such in the
+recording's `description` so nobody later reads it as more.
 
 ### Capture so that recordings are comparable, not merely present
 
@@ -329,17 +386,20 @@ accurately, so the difference is visible rather than assumed away.
 **For #5, contact timing is the metric, not foot slide.** The existing
 heuristics drive slide to exactly zero on clean input, so slide has no headroom.
 Transition timing does. A recording is most useful here if something independent
-establishes when the feet actually landed — a lighthouse-tracked foot, or a
-pressure mat. Without that, a recording still exercises the detector under real
-noise, which synthetic motion cannot do, but the comparison becomes relative
-rather than absolute.
+establishes when the feet actually landed. There will be no pressure mat — see
+*"No lighthouse: what that costs"* — so the candidate is the impact transient in
+the raw accelerometer, which the `.imu` sidecar now carries. Without some such
+reference a recording still exercises the detector under real noise, which
+synthetic motion cannot do, but the comparison becomes relative rather than
+absolute.
 
-**For #6, jumping needs a positional reference to be ground truth.** The metric
-is vertical centre-of-mass error through flight, and no IMU-only setup knows the
-true apex. A lighthouse or HMD position track alongside the recording turns it
-from "the estimate is self-consistent" into "the estimate is right". Capture
-that if the hardware is available; the recording is still worth having if not,
-because takeoff and landing timing are measurable from contact alone.
+**For #6, the apex comes from flight time rather than from a position sensor.**
+The metric is vertical centre-of-mass error through flight. There will be no
+lighthouse, and none is needed: a centre of mass that leaves and returns to the
+same height satisfies `h = g·t²/8`, so timing takeoff and landing gives the true
+apex outright. What the recording must contain is therefore *clean transitions* —
+a still moment before each jump, and no shuffling on landing — because the
+timing is the measurement.
 
 **For #4, the useful recordings are the ones where the corrections engage.**
 `crouch` for floor clip, `walk-in-place` for skating. What is being measured
