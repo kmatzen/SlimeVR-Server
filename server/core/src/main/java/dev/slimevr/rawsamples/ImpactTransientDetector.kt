@@ -68,7 +68,15 @@ class ImpactTransientDetector(
 	 * samples. 150 ms is comfortably below the fastest plausible step and
 	 * comfortably above the ring.
 	 */
-	val refractoryMicros: Long = 150_000,
+	val refractoryMicros: Long = 350_000,
+	/**
+	 * Width of the window the local scale is estimated over.
+	 *
+	 * Long enough to contain several strides, so a single impact cannot inflate
+	 * the scale that is meant to detect it, and short enough to track the
+	 * difference between standing and walking rather than averaging across it.
+	 */
+	val scaleWindowMicros: Long = 2_000_000,
 ) {
 	data class Impact(
 		val micros: Long,
@@ -107,17 +115,90 @@ class ImpactTransientDetector(
 		}
 	}
 
+	/**
+	 * A contact interval: when the foot landed, and when it left.
+	 *
+	 * [toeOffMicros] is null when no release could be found for a strike, which
+	 * is the honest answer at the end of a recording and whenever the release is
+	 * too soft to see.
+	 */
+	data class Contact(val strikeMicros: Long, val toeOffMicros: Long?) {
+		val stanceMicros: Long? get() = toeOffMicros?.minus(strikeMicros)
+	}
+
+	/**
+	 * Pairs each heel strike with the toe-off that ends its stance.
+	 *
+	 * ## Why toe-off needs a different search
+	 *
+	 * A heel strike is an impact and a toe-off is a release, so the release is
+	 * far weaker -- measured on a real walk, about 3.6x smaller. Simply lowering
+	 * the threshold until releases appear also drops it below the loudest thing
+	 * in a *stationary* capture, which peaks around 11 times its own local scale.
+	 * A detector that finds toe-off that way invents footfalls in anyone standing
+	 * still.
+	 *
+	 * So the release is only ever looked for **after a strike has been found**,
+	 * inside the window where gait says it must be. Nothing is searched for at
+	 * rest because nothing precedes it there, which is what makes a lower
+	 * threshold safe.
+	 *
+	 * ## Why the result is checkable without a camera
+	 *
+	 * Stance is about 60% of a gait cycle and swing about 40%, so the two
+	 * intervals should alternate at roughly 1.5:1. On the committed walking
+	 * fixture they come out at 782 ms and 499 ms -- a ratio of 1.57, summing to
+	 * 1281 ms against a stride measured independently at 1256 ms.
+	 *
+	 * That agreement is the evidence. A detector firing on something other than
+	 * strike and release would have no reason to reproduce the duty cycle of
+	 * human gait.
+	 */
+	fun detectContacts(log: ImuLogReader): List<Contact> = detectContacts(log.accel, log.accScale)
+
+	fun detectContacts(samples: ImuLogReader.Samples, scale: Float): List<Contact> {
+		val strikes = detect(samples, scale).impacts
+		if (strikes.isEmpty()) return emptyList()
+
+		val jerk = jerkOf(samples, scale)
+		val localMad = localScale(jerk, samples.micros)
+		val releaseThreshold = thresholdMads / RELEASE_THRESHOLD_DIVISOR
+
+		return strikes.mapIndexed { index, strike ->
+			val nextStrike = strikes.getOrNull(index + 1)?.micros ?: Long.MAX_VALUE
+			// Stance cannot begin instantly -- the impact itself rings -- and
+			// cannot outlast the stride it belongs to.
+			val from = strike.micros + refractoryMicros
+			val until = minOf(nextStrike - MIN_SWING_MICROS, strike.micros + MAX_STANCE_MICROS)
+
+			var best = -1
+			var bestValue = 0.0
+			for (i in jerk.indices) {
+				val t = samples.micros[i + 1]
+				if (t < from) continue
+				if (t > until) break
+				val mad = localMad[i]
+				if (mad <= 0.0) continue
+				val ratio = jerk[i] / mad
+				if (ratio >= releaseThreshold && ratio > bestValue) {
+					bestValue = ratio
+					best = i
+				}
+			}
+			Contact(strike.micros, if (best >= 0) samples.micros[best + 1] else null)
+		}
+	}
+
 	fun detect(log: ImuLogReader): Result = detect(log.accel, log.accScale)
 
-	fun detect(samples: ImuLogReader.Samples, scale: Float): Result {
-		if (samples.size < 3) {
-			return Result(emptyList(), 0.0, 0.0, samples.size, 0.0)
-		}
-
-		// |a| per sample, then first difference. Only consecutive samples are
-		// differenced: a pair either side of a marked gap is not adjacent in
-		// time, and treating it as such would manufacture a huge jerk exactly
-		// where the recording admits it has no data.
+	/**
+	 * |a| per sample, first-differenced.
+	 *
+	 * Only consecutive samples are differenced: a pair either side of a marked
+	 * gap is not adjacent in time, and treating it as such would manufacture a
+	 * huge jerk exactly where the recording admits it has no data.
+	 */
+	private fun jerkOf(samples: ImuLogReader.Samples, scale: Float): DoubleArray {
 		val jerk = DoubleArray(samples.size - 1)
 		for (i in 1 until samples.size) {
 			val adjacent = samples.micros[i] - samples.micros[i - 1] <= MAX_ADJACENT_MICROS
@@ -127,17 +208,32 @@ class ImpactTransientDetector(
 				0.0
 			}
 		}
+		return jerk
+	}
 
-		val mad = medianAbsoluteDeviation(jerk)
-		if (mad <= 0.0) {
-			return Result(emptyList(), 0.0, 0.0, samples.size, samples.durationSeconds)
+	fun detect(samples: ImuLogReader.Samples, scale: Float): Result {
+		if (samples.size < 3) {
+			return Result(emptyList(), 0.0, 0.0, samples.size, 0.0)
 		}
 
-		val threshold = mad * thresholdMads
+		val jerk = jerkOf(samples, scale)
+
+		val globalMad = medianAbsoluteDeviation(jerk)
+		if (globalMad <= 0.0) {
+			return Result(emptyList(), 0.0, 0.0, samples.size, samples.durationSeconds)
+		}
+		val localMad = localScale(jerk, samples.micros)
+
 		val impacts = mutableListOf<Impact>()
 		var i = 0
 		var peak = 0.0
 		while (i < jerk.size) {
+			val mad = localMad[i]
+			if (mad <= 0.0) {
+				i++
+				continue
+			}
+			val threshold = mad * thresholdMads
 			if (jerk[i] / mad > peak) peak = jerk[i] / mad
 			if (jerk[i] < threshold) {
 				i++
@@ -151,7 +247,8 @@ class ImpactTransientDetector(
 			var j = i
 			while (j < jerk.size && samples.micros[j] - samples.micros[i] < refractoryMicros) {
 				if (jerk[j] > jerk[best]) best = j
-				if (jerk[j] / mad > peak) peak = jerk[j] / mad
+				val scale = localMad[j]
+				if (scale > 0.0 && jerk[j] / scale > peak) peak = jerk[j] / scale
 				j++
 			}
 			impacts.add(Impact(samples.micros[best + 1], jerk[best] / mad))
@@ -160,11 +257,42 @@ class ImpactTransientDetector(
 
 		return Result(
 			impacts = impacts,
-			noiseMad = mad,
+			noiseMad = globalMad,
 			peakToNoise = peak,
 			sampleCount = samples.size,
 			durationSeconds = samples.durationSeconds,
 		)
+	}
+
+	/**
+	 * MAD of the jerk in a window around each sample.
+	 *
+	 * Evaluated on a coarse grid and held constant between grid points: the
+	 * scale is a property of what the leg is doing over seconds, so computing it
+	 * per sample would cost a great deal to say the same thing.
+	 */
+	private fun localScale(jerk: DoubleArray, micros: LongArray): DoubleArray {
+		val out = DoubleArray(jerk.size)
+		val half = scaleWindowMicros / 2
+		var gridStart = 0
+		while (gridStart < jerk.size) {
+			val centre = micros[gridStart]
+			var lo = gridStart
+			while (lo > 0 && centre - micros[lo] < half) lo--
+			var hi = gridStart
+			while (hi < jerk.size - 1 && micros[hi] - centre < half) hi++
+
+			val window = jerk.copyOfRange(lo, hi + 1)
+			val mad = medianAbsoluteDeviation(window)
+
+			var gridEnd = gridStart
+			while (gridEnd < jerk.size && micros[gridEnd] - centre < scaleWindowMicros / 8) {
+				out[gridEnd] = mad
+				gridEnd++
+			}
+			gridStart = if (gridEnd > gridStart) gridEnd else gridStart + 1
+		}
+		return out
 	}
 
 	private fun medianAbsoluteDeviation(values: DoubleArray): Double {
@@ -188,5 +316,19 @@ class ImpactTransientDetector(
 		 * so ordinary jitter does not trip it but a marked gap does.
 		 */
 		private const val MAX_ADJACENT_MICROS = 30_000L
+
+		/**
+		 * How much weaker a release may be than the strike threshold.
+		 *
+		 * Measured at about 3.6x on a real walk; three keeps a little margin
+		 * without reaching down into the range a stationary capture occupies.
+		 */
+		private const val RELEASE_THRESHOLD_DIVISOR = 3.0
+
+		/** A stride's swing phase is never shorter than this. */
+		private const val MIN_SWING_MICROS = 200_000L
+
+		/** Nor its stance longer than this, at any plausible walking cadence. */
+		private const val MAX_STANCE_MICROS = 1_100_000L
 	}
 }

@@ -26,12 +26,10 @@ import kotlin.test.assertTrue
  * 2. **Does a real heel strike, through a real leg, produce one?**
  *    Not answerable here. It needs a tracker on a shin and somebody to walk.
  *
- * Everything below is the first half plus one thing that is better than
- * synthetic: **a real stationary capture as the negative control.** A detector
- * that fires on a still device is useless no matter how well it scores on
- * generated impacts, and a real device's floor -- quantisation, mounting,
- * whatever the desk is doing -- is not something synthetic noise can stand in
- * for.
+ * Both halves are now answered. A tracker went on a shin, and the fixtures
+ * below are what came back: a stationary capture, five deliberate stamps the
+ * wearer counted, and a normal walk. The synthetic cases are kept because they
+ * are the only ones where the true impact time is known to the sample.
  */
 class ImpactTransientTests {
 
@@ -303,5 +301,159 @@ class ImpactTransientTests {
 			magnitude in 9.0..10.6,
 			"a stationary tracker reads $magnitude m/s^2; scale factors are not being applied correctly",
 		)
+	}
+
+	// --- the real answer, from a tracker on a shin ---------------------------
+
+	private fun fixture(name: String): ImuLogReader = ImuLogReader.read(
+		java.io.File(javaClass.getResource("/rawsamples/$name")!!.toURI()),
+	)
+
+	/**
+	 * The cheap kill, and it did not kill it.
+	 *
+	 * Five deliberate heel stamps, counted by the wearer, trimmed from a
+	 * ten-stamp capture where the detector found ten. If a hard stamp through a
+	 * boot and a tibia had not reached a mid-shin tracker, issue #41 would have
+	 * ended here -- and issue #6 would have lost its flight-time ground truth at
+	 * the same moment.
+	 *
+	 * It reached it enormously. Against the walking-motion scale the weakest of
+	 * the ten peaked at 826 MAD and the strongest at 2395, on a threshold of 20.
+	 */
+	@Test
+	@DisplayName("finds every deliberate heel stamp, on a known count")
+	fun `stamps are found`() {
+		val result = ImpactTransientDetector().detect(fixture("shin-stamp-lsm6dsv.imu"))
+		println("stamps: ${result.report()}")
+
+		// A stamp is a whole movement -- lift, strike, settle -- so it produces
+		// more than one transient. What must be true is that every stamp is
+		// represented and none is invented, which a count within one of five is.
+		val strong = result.impacts.filter { it.prominence > 100 }
+		println("  strong transients: ${strong.size}, prominence ${strong.map { it.prominence.toInt() }}")
+		assertTrue(
+			strong.size in 4..8,
+			"five counted stamps produced ${strong.size} strong transients: ${result.report()}",
+		)
+	}
+
+	/**
+	 * The question issue #41 actually turns on.
+	 *
+	 * A normal heel strike is far softer than a stamp and arrives buried in the
+	 * leg's own swing, which is the real competition: standing still on a shin
+	 * gives a jerk MAD of 0.0044 m/s², walking gives 0.216 -- **forty-nine times
+	 * larger**. Sensor noise is not the floor here; the wearer is.
+	 *
+	 * Fourteen seconds of ordinary overground walking, in a circle. What makes
+	 * the answer credible without a camera is not the count on its own but its
+	 * *regularity*:
+	 * detections land about 1.26 s apart with little spread, which is one leg at
+	 * a normal cadence, and each is a single transient rather than a burst.
+	 */
+	@Test
+	@DisplayName("finds heel strikes in a normal walk, at a gait-like cadence")
+	fun `walking strikes are found at gait cadence`() {
+		val log = fixture("shin-walk-lsm6dsv.imu")
+		val result = ImpactTransientDetector().detect(log)
+		println("walk: ${result.report()}")
+
+		val intervals = result.intervalsMillis()
+		val median = intervals.sorted()[intervals.size / 2]
+		println("  intervals ms: median=%.0f min=%.0f max=%.0f".format(median, intervals.min(), intervals.max()))
+
+		// One leg strikes once per stride. Anything near half of this would mean
+		// two events per stride were being counted -- plausibly strike plus
+		// toe-off, which would be a different and also interesting result.
+		assertTrue(
+			result.impactsPerSecond in 0.5..1.3,
+			"detected ${result.impactsPerSecond}/s, which is not one leg at a walking cadence",
+		)
+		assertTrue(
+			median in 900.0..1600.0,
+			"median interval $median ms is not a stride",
+		)
+	}
+
+	/**
+	 * And the same detector, unchanged, must still find nothing when the wearer
+	 * is standing still.
+	 *
+	 * This is the pairing that makes the walking result mean something. A
+	 * detector tuned until it produced a gait-like number would also fire on a
+	 * still leg; one that does neither has separated the impact from the motion
+	 * rather than from the noise.
+	 */
+	@Test
+	@DisplayName("the same settings that find gait find nothing at rest")
+	fun `gait settings stay silent at rest`() {
+		val result = ImpactTransientDetector().detect(stationary())
+		assertEquals(0, result.impacts.size, "fired at rest with the settings that detect gait")
+	}
+
+	// --- both edges of the contact interval ----------------------------------
+
+	/**
+	 * Toe-off is recoverable too, and the gait duty cycle is the proof.
+	 *
+	 * Issue #41 named this as the risk it could not resolve: touchdown is a
+	 * shock and toe-off is not, so the method might date one edge of the contact
+	 * interval and never the other.
+	 *
+	 * It dates both. What makes that believable without a camera is not the
+	 * count but the *shape*: stance is about 60% of a human gait cycle and swing
+	 * about 40%, and nothing in this detector knows that. If it were firing on
+	 * something other than a strike and a release it would have no reason to
+	 * reproduce the ratio.
+	 */
+	@Test
+	@DisplayName("pairs each strike with a toe-off, at a human stance fraction")
+	fun `contact intervals have a gait duty cycle`() {
+		val log = fixture("shin-walk-lsm6dsv.imu")
+		val contacts = ImpactTransientDetector().detectContacts(log)
+		val paired = contacts.filter { it.toeOffMicros != null }
+
+		println("contacts: ${contacts.size}, paired: ${paired.size}")
+		val stances = paired.mapNotNull { it.stanceMicros }.map { it / 1000.0 }
+		val strides = contacts.zipWithNext { a, b -> (b.strikeMicros - a.strikeMicros) / 1000.0 }
+		val stance = stances.sorted()[stances.size / 2]
+		val stride = strides.sorted()[strides.size / 2]
+		println("  median stance %.0f ms, median stride %.0f ms, duty %.2f".format(stance, stride, stance / stride))
+
+		// The final strike has no stride after it to bound the search, so it can
+		// never pair; anything much worse than that means releases are being
+		// missed rather than legitimately absent.
+		assertTrue(
+			paired.size >= contacts.size - 2,
+			"only ${paired.size} of ${contacts.size} strikes found a release",
+		)
+		// Human walking stance fraction is about 0.6. Anything near 0.5 or 0.75
+		// would mean the second event is not toe-off.
+		// Textbook walking is about 0.60, rising with slower cadence -- stance
+		// lengthens while swing does not. 0.64 at a 1256 ms stride is an
+		// unhurried walk, which is what this was.
+		assertTrue(
+			stance / stride in 0.50..0.75,
+			"stance fraction ${stance / stride} is not a walking duty cycle",
+		)
+	}
+
+	/**
+	 * And the lower threshold that finds a release must not reach into a
+	 * stationary capture.
+	 *
+	 * This is the reason releases are searched for only *after* a strike. The
+	 * loudest sample in a still recording reaches about 11 times its own local
+	 * scale, which is well inside the range a toe-off occupies -- so a detector
+	 * that simply lowered its threshold would report footfalls for anyone
+	 * standing still. Nothing precedes a release at rest, so nothing is looked
+	 * for.
+	 */
+	@Test
+	@DisplayName("no contacts at all in a stationary capture")
+	fun `no contacts at rest`() {
+		val contacts = ImpactTransientDetector().detectContacts(stationary())
+		assertEquals(0, contacts.size, "reported ${contacts.size} contacts on a device at rest")
 	}
 }
