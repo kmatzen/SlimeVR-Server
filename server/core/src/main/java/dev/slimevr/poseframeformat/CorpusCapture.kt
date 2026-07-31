@@ -1,6 +1,8 @@
 package dev.slimevr.poseframeformat
 
 import dev.slimevr.VRServer
+import dev.slimevr.rawsamples.ImuLogWriter
+import dev.slimevr.rawsamples.RawSampleCapture
 import dev.slimevr.tracking.processor.config.SkeletonConfigOffsets
 import dev.slimevr.tracking.trackers.Tracker
 import io.eiren.util.logging.LogManager
@@ -68,6 +70,15 @@ class CorpusCapture(private val server: VRServer) {
 		val trackers: Int,
 		val derived: CorpusMetadataWriter.Derived,
 		/**
+		 * Raw sample sidecars, one per sensor that produced any.
+		 *
+		 * Empty when no tracker streamed -- which is the state for any firmware
+		 * without kmatzen/SlimeVR-Tracker-ESP#23, and leaves the recording
+		 * fused-only and therefore pinned to the firmware that made it.
+		 */
+		val raw: List<File>,
+		val rawSamples: Int,
+		/**
 		 * Conditions worth the operator's attention that are not errors -- a
 		 * recording with Stay Aligned off, or one whose trackers reported no IMU.
 		 * Both produce a valid recording that answers fewer questions than the
@@ -131,6 +142,13 @@ class CorpusCapture(private val server: VRServer) {
 				"(${"%.1f".format(seconds)} s) from ${recordable.size} trackers",
 		)
 
+		// Raw capture runs for exactly the recorded interval. Started before the
+		// recorder so the first fused frame already has raw samples beside it,
+		// and stopped in a finally so a failed capture does not leave every
+		// tracker streaming into a collector nobody will read.
+		val collector = server.trackersServer.rawSampleCollector
+		server.trackersServer.setRawSampleStreaming(true)
+
 		val future = recorder.startFrameRecording(numFrames, interval, recordable) { progress ->
 			onProgress?.invoke(progress.frame, progress.totalFrames)
 		}
@@ -138,10 +156,25 @@ class CorpusCapture(private val server: VRServer) {
 		// Generous relative to the recording itself: the bound exists so a
 		// server that stops ticking does not hang the console thread forever,
 		// not to police timing.
-		val frames = future.get((seconds * 2f).toLong() + 30L, TimeUnit.SECONDS)
+		val frames = try {
+			future.get((seconds * 2f).toLong() + 30L, TimeUnit.SECONDS)
+		} finally {
+			server.trackersServer.setRawSampleStreaming(false)
+		}
 
 		PfrIO.writeToFile(pfr, frames)
 		meta.writeText(CorpusMetadataWriter.render(name, attestation, derived))
+
+		// One .imu per sensor, since each has its own nominal timeline and its
+		// own loss accounting. Merging them would make both uninterpretable.
+		val rawFiles = mutableListOf<File>()
+		for ((key, capture) in collector.results()) {
+			if (capture.sampleCount == 0) continue
+			val suffix = if (collector.results().size == 1) "" else ".${key.deviceId}-${key.sensorId}"
+			val imu = File(outputDir, "$name$suffix.imu")
+			ImuLogWriter.write(imu, capture)
+			rawFiles += imu
+		}
 
 		verify(name, pfr, meta, frames.maxFrameCount, frames.frameHolders.size)
 
@@ -152,7 +185,11 @@ class CorpusCapture(private val server: VRServer) {
 			frames = frames.maxFrameCount,
 			trackers = frames.frameHolders.size,
 			derived = derived,
-			warnings = warningsFor(derived) + timestampWarnings(frames),
+			raw = rawFiles,
+			rawSamples = collector.sampleCount,
+			warnings = warningsFor(derived) +
+				timestampWarnings(frames) +
+				rawWarnings(collector.results().values, collector.unscalableBatches),
 		)
 	}
 
@@ -270,6 +307,52 @@ class CorpusCapture(private val server: VRServer) {
 					"time alignment, exactly as they would live."
 			},
 		)
+	}
+
+	/**
+	 * What the raw capture did or did not manage.
+	 *
+	 * The absent case is the important one, and it is not an error: a recording
+	 * with no raw samples is a perfectly good regression baseline for the
+	 * server. What it cannot do is survive a firmware change -- the fused output
+	 * it holds was produced by one VQF configuration, one error model and one
+	 * set of rest-detection thresholds, and nothing in the file says what they
+	 * were. That is worth saying out loud while the session is still running,
+	 * because it is the difference between recording once and re-shooting.
+	 */
+	private fun rawWarnings(
+		captures: Collection<RawSampleCapture>,
+		unscalableBatches: Long,
+	): List<String> {
+		val warnings = mutableListOf<String>()
+
+		if (captures.isEmpty()) {
+			warnings += "No tracker streamed raw samples, so this recording is " +
+				"fused-only and stays tied to the firmware that made it. Needs " +
+				"firmware with raw sample streaming " +
+				"(kmatzen/SlimeVR-Tracker-ESP#23) -- not recoverable afterwards."
+			return warnings
+		}
+
+		if (unscalableBatches > 0) {
+			warnings += "$unscalableBatches raw batches arrived before the stream " +
+				"metadata that scales them and were discarded. Expected only at the " +
+				"very start of a capture; a large count means the metadata packet " +
+				"is not getting through."
+		}
+
+		for (capture in captures) {
+			if (capture.isComplete) continue
+			// Named rather than summarised, because the two causes have
+			// different fixes: the tracker could not send fast enough, or the
+			// network dropped it.
+			warnings += "Raw capture for ${capture.sensorName} has gaps -- " +
+				"${capture.accel.summary()}; ${capture.gyro.summary()}. The .imu " +
+				"file marks them, so it is still usable, but a re-fusion run " +
+				"cannot cross a gap."
+		}
+
+		return warnings
 	}
 
 	/**
