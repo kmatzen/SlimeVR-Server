@@ -10,6 +10,11 @@ validation, the replay driver, baseline keys, the CI table — is built and
 tested. Adding a recording is one console command and a two-file drop, with no
 code change.
 
+**Start at [Building the dataset](#building-the-dataset)** if you are planning a
+session rather than adding a file. It covers what unlocks at how many trackers —
+several open questions need far fewer than a full body — and the decisions that
+have to be made before anything is recorded rather than after.
+
 ## Why this exists when synthetic motion already does
 
 `SyntheticMotion` gives repeatability, isolation, and no assets to maintain. It
@@ -213,6 +218,141 @@ stay_aligned.standing.lower_leg_deg = 1.0
 These are the same class of gap as the missing sample rate, and worth the same
 treatment: cheap to record at capture time, impossible to recover later.
 
+## Building the dataset
+
+The tooling is finished. What gates the corpus now is how many trackers are on a
+body, and a handful of decisions that become irreversible the moment anything is
+recorded.
+
+### The recordings unlock at different tracker counts
+
+The table below implies a full body, which makes the corpus look like an
+all-or-nothing prospect. It is not. The open questions need different numbers,
+and the cheapest ones need very few:
+
+| trackers | what it unblocks |
+| --- | --- |
+| **1** | Sensor characterisation through `tools/fusion-bench` — noise floor, gyroscope scale, ODR error, `restThAcc`. No skeleton involved, so no wearer either. |
+| **2**, on one leg | **Issue #3's head-to-head.** `KinematicHeading` solves relative heading across a *single* hinge, so a thigh and a shin are the whole requirement. |
+| **5** — hip, both thighs, both shins | Issue #5's contact timing, and issue #4's segment deformation under real noise. |
+| **7** — the above plus chest and head | Issue #6's jump case, and anything about whole-body pose. |
+
+The single-tracker tier is not a consolation prize. A stationary desk capture is
+enough to measure the noise floor and to check the shipped `restThAcc` against
+it, and on the first device tried that margin turned out to be 4.5× the settled
+minimum — a tuning question answered with one tracker and no wearer.
+
+The two-tracker tier deserves particular attention. Issue #3 is the only route
+to bounded yaw this pair of repositories can still take, since the magnetometer
+path is closed as won't-validate on the firmware side, and it needs one hinge.
+
+### Decide these before the first session, not after
+
+Everything here is cheap now and awkward later. The list in *"What to do about
+it at capture time"* below covers the per-session mechanics; these are the ones
+that need settling once, in advance.
+
+1. **Where `.imu` sidecars live** — repository, LFS, or release assets. Raw runs
+   about 17 kB/s for eight trackers against ~35 kB/s for the fused `.pfr`, so it
+   is cheaper than what is already being paid, but five five-minute sessions is
+   still on the order of 75 MB. The `.pfr` and `.meta` pair belongs in git
+   regardless: it is what the suite gates on.
+2. **Decided: there will be no external position reference.** No lighthouse and
+   no pressure mat. What that costs, and what to use instead, is
+   *"No lighthouse: what that costs"* below — it is less than it sounds, and
+   two of the substitutes are free.
+3. **The consent wording**, agreed before someone is standing in a room waiting
+   for it. `record-corpus` will not proceed without it, which is the point.
+
+### No lighthouse: what that costs
+
+Recorded as a decision rather than a constraint, because it changes what some
+recordings can claim and nothing about whether they are worth making.
+
+**Most of the board never needed one.** The distinction is between metrics that
+are *internally consistent* and metrics that are *absolute*:
+
+- **Issue #4's segment deformation** is measured against the skeleton's own bone
+  lengths. Forward kinematics reads exactly `0.000000`, which is the metric's own
+  calibration. An external reference would not make it more true.
+- **Issue #3's yaw** is *relative* heading across a hinge, and the hinge
+  constraint is physics rather than a sensor: two segments joined by one must
+  agree about where its axis points, and their disagreement is the error. It is
+  also a head-to-head between two methods, which is relative by construction.
+
+So the one- and two-tracker tiers above are entirely unaffected, and those are
+the tiers that unblock the most per tracker.
+
+**Issues #5 and #6 are the ones that lose something.** Contact *timing* and
+vertical centre-of-mass error through flight are both absolute quantities, and
+an IMU-only rig knows neither.
+
+**Do not substitute the offline labeller for ground truth.** It is the obvious
+idea and it is wrong: measured against the same sequences, it scores F1 0.902
+where a causal trailing-stillness rule scores 0.935. Using a reference that is
+worse than the method under test bakes its error into every result and looks
+like a finding.
+
+Three substitutes, cheapest first:
+
+1. **For #6, flight time gives the apex analytically.** A centre of mass that
+   leaves and returns to the same height satisfies `h = g·t²/8`. Time takeoff and
+   landing and the true apex follows, with no position sensor anywhere. This is
+   not circular: a free centre of mass follows a ballistic arc whatever the
+   estimator does, so it is a legitimate reference for whether the estimator
+   reproduced it.
+
+2. **For both, try the raw accelerometer before buying anything.** A heel strike
+   is a sharp impact transient. Fused output smooths it; the raw counts in the
+   `.imu` sidecar do not, and at 120 Hz accelerometer / 240 Hz gyroscope a
+   transient resolves to roughly 8 ms — comfortably inside the 50 ms that issue
+   #5 names as the damaging threshold.
+
+   **Untested.** The sensor sits on the shin rather than the foot, so the impact
+   arrives through the leg and how sharp the edge remains is an open question. It
+   is answerable from a single walking capture, which is why it is first on the
+   list: if it holds, it replaces the pressure mat outright, and it is a
+   capability that did not exist before raw samples were recorded.
+
+3. **Failing that, video at 240 fps** resolves touchdown and liftoff to ±4 ms.
+   The hard part is synchronising it to the recording, not the frame rate.
+
+**What to write down if none of them work.** A recording with no timing reference
+still exercises the detector under real sensor noise, which synthetic motion
+cannot. The comparison simply becomes relative — method A against method B —
+rather than absolute. That is a weaker claim, and worth stating as such in the
+recording's `description` so nobody later reads it as more.
+
+### Capture so that recordings are comparable, not merely present
+
+- **Start every recording with a still segment.** It is what a later reader
+  estimates drift and bias against, and it costs seconds.
+- **Keep everything short except the drift recordings.** Yaw drift needs minutes
+  to develop; the leg corrections resolve in seconds, and a long recording
+  buries the interval that matters.
+- **For issue #3, the wearer's actual stance must differ from their captured
+  relaxed pose.** That is the ordinary case and needs no choreography, but it is
+  the whole discriminating power of the recording — measured on synthetic motion,
+  where the stance *is* the configured pose, Stay Aligned removes essentially all
+  injected drift and the comparison says nothing.
+- **Record a `known-bad-*` whenever a real complaint can be reproduced.** Those
+  are the hardest recordings to recreate later and the most valuable, because
+  they become their own fix-verification.
+
+### What a good first session looks like
+
+Not "a file exists". The suite already fails on a recording that cannot be
+loaded, and `record-corpus` already warns about the four ways a recording answers
+less than it appears to — no IMU type, Stay Aligned disabled, no sample
+timestamps, no raw samples.
+
+The criterion worth aiming at is **a recording that replays and produces a
+non-zero, non-degenerate residual.** Every `+legtweaks` metric currently reads
+`0.000000` on synthetic input, which gates *"the corrections still work"* and
+nothing finer. A graded number is the thing real data is for, and the first
+recording that produces one is the point at which the corpus starts paying for
+itself.
+
 ## What to capture, and why each one
 
 The table above is the generic list from issue #1. The work on issues #3–#6 has
@@ -246,17 +386,20 @@ accurately, so the difference is visible rather than assumed away.
 **For #5, contact timing is the metric, not foot slide.** The existing
 heuristics drive slide to exactly zero on clean input, so slide has no headroom.
 Transition timing does. A recording is most useful here if something independent
-establishes when the feet actually landed — a lighthouse-tracked foot, or a
-pressure mat. Without that, a recording still exercises the detector under real
-noise, which synthetic motion cannot do, but the comparison becomes relative
-rather than absolute.
+establishes when the feet actually landed. There will be no pressure mat — see
+*"No lighthouse: what that costs"* — so the candidate is the impact transient in
+the raw accelerometer, which the `.imu` sidecar now carries. Without some such
+reference a recording still exercises the detector under real noise, which
+synthetic motion cannot do, but the comparison becomes relative rather than
+absolute.
 
-**For #6, jumping needs a positional reference to be ground truth.** The metric
-is vertical centre-of-mass error through flight, and no IMU-only setup knows the
-true apex. A lighthouse or HMD position track alongside the recording turns it
-from "the estimate is self-consistent" into "the estimate is right". Capture
-that if the hardware is available; the recording is still worth having if not,
-because takeoff and landing timing are measurable from contact alone.
+**For #6, the apex comes from flight time rather than from a position sensor.**
+The metric is vertical centre-of-mass error through flight. There will be no
+lighthouse, and none is needed: a centre of mass that leaves and returns to the
+same height satisfies `h = g·t²/8`, so timing takeoff and landing gives the true
+apex outright. What the recording must contain is therefore *clean transitions* —
+a still moment before each jump, and no shuffling on landing — because the
+timing is the measurement.
 
 **For #4, the useful recordings are the ones where the corrections engage.**
 `crouch` for floor clip, `walk-in-place` for skating. What is being measured
