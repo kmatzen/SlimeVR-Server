@@ -157,11 +157,22 @@ class CorpusCaptureConsole(
 		output.println("Recorded ${result.frames} frames from ${result.trackers} trackers.")
 		output.println("  ${result.pfr.absolutePath}")
 		output.println("  ${result.meta.absolutePath}")
+		for (raw in result.raw) {
+			output.println("  ${raw.absolutePath}")
+		}
 		output.println()
 		output.println("Derived from the running server:")
 		output.println("  rate      ${result.derived.rateHz} Hz")
 		output.println("  trackers  ${result.derived.trackers}")
 		output.println("  imu       ${result.derived.imuType?.name ?: "(none reported)"}")
+		output.println(
+			"  raw       " +
+				if (result.raw.isEmpty()) {
+					"none (recording is fused-only)"
+				} else {
+					"${result.rawSamples} samples in ${result.raw.size} file(s)"
+				},
+		)
 		output.println(
 			"  aligned   " +
 				if (result.derived.stayAligned != null) {
@@ -177,7 +188,7 @@ class CorpusCaptureConsole(
 		}
 
 		output.println()
-		output.println("Both files are needed. Commit them together into")
+		output.println("The .pfr and .meta are needed together. Commit them into")
 		output.println("server/core/src/test/resources/corpus/, then regenerate the")
 		output.println("corpus baseline block -- see corpus/README.md.")
 	}

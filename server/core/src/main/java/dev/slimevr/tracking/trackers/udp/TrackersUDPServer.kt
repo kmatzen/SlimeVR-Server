@@ -5,6 +5,8 @@ import dev.slimevr.NetworkProtocol
 import dev.slimevr.VRServer
 import dev.slimevr.config.config
 import dev.slimevr.protocol.rpc.MAG_TIMEOUT
+import dev.slimevr.rawsamples.RawSampleCollector
+import dev.slimevr.rawsamples.RawSampleKind
 import dev.slimevr.tracking.trackers.*
 import io.eiren.util.Util
 import io.eiren.util.collections.FastList
@@ -32,6 +34,40 @@ import kotlin.coroutines.resume
  * Receives trackers data by UDP using extended owoTrack protocol.
  */
 class TrackersUDPServer(private val port: Int, name: String, private val trackersConsumer: Consumer<Tracker>) : Thread(name) {
+
+	/**
+	 * Raw sample capture, off unless a recording is running.
+	 *
+	 * Lives here rather than on a tracker because the streams are keyed by
+	 * `(device, sensor)` and arrive on this thread; the capture is a
+	 * whole-session thing, not a per-tracker one.
+	 */
+	@JvmField
+	val rawSampleCollector = RawSampleCollector()
+
+	/**
+	 * Tells every connected tracker to start or stop streaming raw samples.
+	 *
+	 * A command rather than a stored setting, matching the firmware: nothing
+	 * about a capture session is persisted on either side.
+	 */
+	fun setRawSampleStreaming(streaming: Boolean) {
+		if (streaming) rawSampleCollector.start() else rawSampleCollector.stop()
+		synchronized(connections) {
+			for (connection in connections) {
+				try {
+					val bb = ByteBuffer.allocate(64).order(ByteOrder.BIG_ENDIAN)
+					bb.putInt(PACKET_RAW_SAMPLE_CONTROL)
+					bb.putLong(0)
+					bb.put(0xFF.toByte())
+					bb.put(if (streaming) 1 else 0)
+					socket.send(DatagramPacket(bb.array(), bb.position(), connection.address))
+				} catch (e: Exception) {
+					LogManager.warning("[TrackerServer] Failed to send raw sample control", e)
+				}
+			}
+		}
+	}
 	private val random = Random()
 	private val connections: MutableList<UDPDevice> = FastList()
 	private val connectionsByAddress: MutableMap<SocketAddress, UDPDevice> = HashMap()
@@ -467,6 +503,36 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 				}
 			}
 
+			is UDPPacket30RawSampleBatch -> {
+				// Dropped unless a capture asked for it. The trackers only
+				// stream when told to, so this is belt and braces -- but a
+				// tracker that missed a stop command must not grow the heap.
+				if (connection == null || !rawSampleCollector.isCapturing) return
+				if (packet.isStreamInfo) {
+					rawSampleCollector.streamInfo(
+						connection.id,
+						packet.sensorId,
+						packet.sensorName,
+						packet.accTs,
+						packet.gyrTs,
+						packet.accScale,
+						packet.gyrScale,
+					)
+				} else if (packet.isSamples) {
+					val kind = RawSampleKind.fromId(packet.kind) ?: return
+					rawSampleCollector.samples(
+						connection.id,
+						packet.sensorId,
+						kind,
+						packet.sequence,
+						packet.dropped.toInt(),
+						packet.baseNominalMicros,
+						packet.samples,
+						packet.sampleCount,
+					)
+				}
+			}
+
 			is UDPPacket29RotationDataTimestamped -> {
 				if (connection == null) return
 				val tracker = connection.getTracker(packet.sensorId) ?: return
@@ -728,6 +794,9 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 	}
 
 	companion object {
+		/** Firmware `ReceivePacketType::RawSampleControl`. Start/stop only; nothing persisted. */
+		const val PACKET_RAW_SAMPLE_CONTROL = 30
+
 		/**
 		 * Change between IMU axes and OpenGL/SteamVR axes
 		 */

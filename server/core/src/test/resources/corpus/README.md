@@ -352,7 +352,70 @@ server, fixed-and-unrepresentative is exactly what a baseline wants. It is only
 a problem for questions of the form *"is method A better than method B on real
 data"*, where it matters that the data resembles what users have.
 
-### What would make a recording firmware-independent
+### Raw samples: what makes a recording firmware-independent
+
+Raw gyroscope and accelerometer counts, captured alongside the fused output.
+With them, any fusion configuration and any calibration can be re-run offline,
+forever — the recording stops being tied to the firmware that made it.
+
+`record-corpus` captures them automatically when the trackers support it,
+writing a third file per sensor:
+
+```
+walk-in-place.pfr     the fused recording
+walk-in-place.meta    how it was captured
+walk-in-place.imu     raw pre-calibration samples
+```
+
+The `.imu` is written in `# slimevr-imu-log v1` — the format
+`tools/fusion-bench` in the firmware repository already parses — so a
+wirelessly captured log replays through the existing bench with no new tooling:
+
+```sh
+./build/fusion-bench run walk-in-place.imu
+```
+
+That has been verified end to end against a server-written file, including one
+carrying gap markers.
+
+**Needs firmware with raw sample streaming** (kmatzen/SlimeVR-Tracker-ESP#23).
+Without it nothing streams, the recording is fused-only, and `record-corpus`
+says so — that state is not recoverable afterwards.
+
+#### Gaps are marked, never concatenated over
+
+Losing a fused rotation packet is harmless; the next supersedes it. **Losing a
+raw sample corrupts every re-fusion run downstream of it**, silently, because
+the filter integrates a hole it cannot see.
+
+So a `.imu` never joins across a loss. Two independent kinds are counted apart,
+because they have different causes and different fixes:
+
+- **dropped on tracker** — its buffer overran and it discarded samples rather
+  than overwriting. It could not send fast enough.
+- **lost in transit** — batches that never arrived. The network dropped them.
+
+Both appear in the file header, and each hole gets a marker giving its *exact*
+size:
+
+```
+# INCOMPLETE -- see gap markers below
+# gyro: 304 samples in 2 run(s), 19 batches, 0 dropped on tracker, 3 lost in transit (1 batches)
+# gap gyro missing=3 from_us=5000 to_us=20000
+```
+
+The count is exact rather than estimated because sample times are *nominal* —
+accumulated from the configured sample period rather than read from a clock,
+since the configured period is what the on-device fusion integrates. That makes
+the timeline perfectly regular, so a gap's size is arithmetic.
+
+Markers are `#` comments, which the bench's parser skips, so a holed capture
+still loads — as two shorter captures with a documented hole between them,
+rather than as one continuous capture that silently jumps.
+
+### What the raw file still does not fix
+
+
 
 Raw IMU samples, captured alongside the fused output. With raw gyro and
 accelerometer counts you can re-run any fusion configuration, and any

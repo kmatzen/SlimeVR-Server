@@ -59,6 +59,11 @@ enum class ServerFeatureFlags {
 	 the tracker's own sample time. */
 	PROTOCOL_SAMPLE_TIMESTAMPS,
 
+	/** Server accepts `PACKET_RAW_SAMPLE_BATCH` = 30 (0x1E), carrying batched
+	 raw pre-calibration IMU samples. Without it the tracker never streams, so
+	 an old server and new firmware behave exactly as before. */
+	PROTOCOL_RAW_SAMPLES,
+
 	// Add new flags here
 
 	BITS_TOTAL, ;
@@ -68,6 +73,7 @@ enum class ServerFeatureFlags {
 			PROTOCOL_BUNDLE_SUPPORT,
 			PROTOCOL_BUNDLE_COMPACT_SUPPORT,
 			PROTOCOL_SAMPLE_TIMESTAMPS,
+			PROTOCOL_RAW_SAMPLES,
 
 			// Add enabled flags here
 		)
