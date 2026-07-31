@@ -74,20 +74,62 @@ class RawSampleTests {
 		assertEquals(6 * step, s.runs[1].startMicros)
 	}
 
+	/**
+	 * A tracker-side overrun is a real hole, and must split the run.
+	 *
+	 * This test originally asserted the opposite -- that an overrun "is not a
+	 * hole in what arrived" -- which was wrong, and wrong in the direction the
+	 * whole design exists to prevent. The samples were discarded before they
+	 * were ever buffered, so the batches either side of the overrun are *not*
+	 * contiguous in time. Joining them would produce a run that claims
+	 * continuity across a gap, which is exactly the unmarked hole a re-fusion
+	 * run cannot see.
+	 *
+	 * The two causes still stay counted apart, because they have different
+	 * fixes: the tracker could not send fast enough, versus the network dropped
+	 * it.
+	 */
 	@Test
-	@DisplayName("tracker-side overrun is counted apart from transit loss")
-	fun `overrun counted separately`() {
+	@DisplayName("a tracker-side overrun splits the run and is counted apart from transit loss")
+	fun `overrun splits and is counted separately`() {
 		val s = stream()
 		s.accept(0, 0, 0, samples(1, 1, 1), 1)
 		s.accept(1, 7, step, samples(2, 2, 2), 1)
 
-		// Different causes, different fixes: the tracker could not send fast
-		// enough, versus the network dropped it.
 		assertEquals(7, s.droppedOnTracker)
-		assertEquals(0, s.lostBatches)
+		assertEquals(0, s.lostBatches, "an overrun is not transit loss")
 		assertEquals(0L, s.missingSamples)
 		assertFalse(s.isComplete)
-		assertEquals(1, s.runs.size, "an overrun on the tracker is not a hole in what arrived")
+		assertEquals(2, s.runs.size, "an overrun left the run joined across a real hole")
+	}
+
+	/**
+	 * Contiguity is decided by the tracker's sequence and drop counters, not by
+	 * comparing reconstructed timestamps.
+	 *
+	 * The tracker accumulates its nominal clock in nanoseconds and truncates to
+	 * microseconds per sample, so a time rebuilt as `base + i * step` drifts
+	 * from the tracker's own by up to a microsecond per sample, cumulatively.
+	 *
+	 * Measured on hardware before this was fixed: a clean 1824-sample capture
+	 * came back as 114 runs with 114 `missing=0` gap markers. The file looked
+	 * shredded and was whole.
+	 */
+	@Test
+	@DisplayName("rounding drift in the tracker clock does not split a clean run")
+	fun `rounding drift does not split`() {
+		val s = stream()
+		s.accept(0, 0, 0, samples(1, 1, 1, 2, 2, 2), 2)
+		// One microsecond later than `base + 2 * step` would predict.
+		s.accept(1, 0, 2 * step + 1, samples(3, 3, 3), 1)
+
+		assertEquals(1, s.runs.size, "a microsecond of clock rounding split the run")
+		assertEquals(0, s.lostBatches)
+		assertEquals(0L, s.missingSamples)
+		assertTrue(s.isComplete)
+		// And the tracker's own base is what the third sample reports, rather
+		// than a time the server recomputed for it.
+		assertEquals(2 * step + 1, s.runs[0].sampleMicros(2, step))
 	}
 
 	/**

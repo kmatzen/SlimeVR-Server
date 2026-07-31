@@ -64,8 +64,30 @@ class RawSampleStream(
 		var count: Int = 0
 			private set
 
+		/**
+		 * Where each batch's samples begin, and the time the tracker gave it.
+		 *
+		 * Sample times are anchored per batch rather than derived by multiplying
+		 * a step by an index across the whole run, because the two disagree.
+		 *
+		 * The tracker accumulates its nominal clock in nanoseconds and truncates
+		 * to microseconds per sample; the server would be multiplying a *rounded*
+		 * microsecond step. At the LSM6DSV's calibrated 8319467 ns that is up to
+		 * 1 us of divergence per sample, and it accumulates -- measured on
+		 * hardware as 7 us after 16 samples and growing.
+		 *
+		 * The tracker's own base is authoritative, so it is what gets used.
+		 */
+		private val anchorIndex = mutableListOf<Int>()
+		private val anchorMicros = mutableListOf<Long>()
+
 		/** Samples, three components each, in x, y, z order. */
 		val samples: ShortArray get() = values
+
+		fun anchor(micros: Long) {
+			anchorIndex.add(count)
+			anchorMicros.add(micros)
+		}
 
 		fun add(x: Short, y: Short, z: Short) {
 			if ((count + 1) * 3 > values.size) {
@@ -77,10 +99,19 @@ class RawSampleStream(
 			count++
 		}
 
-		fun sampleMicros(index: Int, stepMicros: Long): Long = startMicros + index * stepMicros
+		fun sampleMicros(index: Int, stepMicros: Long): Long {
+			var at = anchorIndex.binarySearch(index)
+			if (at < 0) at = -at - 2
+			if (at < 0) return startMicros + index * stepMicros
+			return anchorMicros[at] + (index - anchorIndex[at]) * stepMicros
+		}
 
 		/** Nominal time one step past the last sample -- where a continuation would begin. */
-		fun endMicros(stepMicros: Long): Long = startMicros + count * stepMicros
+		fun endMicros(stepMicros: Long): Long = if (count == 0) {
+			startMicros
+		} else {
+			sampleMicros(count - 1, stepMicros) + stepMicros
+		}
 
 		private companion object {
 			const val INITIAL_CAPACITY = 3 * 256
@@ -128,14 +159,21 @@ class RawSampleStream(
 		if (count <= 0) return
 		batches++
 
-		if (droppedTotal > droppedOnTracker) {
-			droppedOnTracker = droppedTotal
-		}
-
 		val current = internalRuns.lastOrNull()
+		// Continuity is a question about *production*, not about arithmetic.
+		// The tracker's sequence counts batches it produced, and its drop
+		// counter says whether anything was discarded between them -- so those
+		// two answer it exactly.
+		//
+		// Comparing timestamps instead looks equivalent and is not: the
+		// tracker's nominal clock truncates nanoseconds to microseconds per
+		// sample, so a reconstructed time drifts from the tracker's by up to a
+		// microsecond per sample. Measured on hardware, that split a clean
+		// 1824-sample capture into 114 runs and emitted 114 `missing=0` gap
+		// markers -- a file that looked shredded and was not.
 		val continues = current != null &&
 			sequence == expectedSequence &&
-			baseMicros == current.endMicros(stepMicros)
+			droppedTotal == droppedOnTracker
 
 		if (!continues) {
 			if (current != null) {
@@ -153,7 +191,12 @@ class RawSampleStream(
 			internalRuns.add(Run(baseMicros))
 		}
 
+		if (droppedTotal > droppedOnTracker) {
+			droppedOnTracker = droppedTotal
+		}
+
 		val run = internalRuns.last()
+		run.anchor(baseMicros)
 		for (i in 0 until count) {
 			run.add(values[i * 3], values[i * 3 + 1], values[i * 3 + 2])
 		}
