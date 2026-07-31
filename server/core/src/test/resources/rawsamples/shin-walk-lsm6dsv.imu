@@ -7,9 +7,14 @@
 # note raw uncalibrated counts; apply *_scale to convert
 #
 # Test fixture, not a corpus recording. Right leg, mid-shin, same tracker and
-# mounting as the stamping fixture. Normal walk in place at a comfortable
-# pace -- the case issue #41 actually turns on, since a normal heel strike is
-# far softer than a stamp and is buried in the leg's own swing.
+# mounting as the stamping fixture. Normal overground walking at a comfortable
+# pace, in a circle -- the case issue #41 actually turns on, since a normal heel
+# strike is far softer than a stamp and is buried in the leg's own swing.
+#
+# Walking a circle rather than in place means the capture carries a continuous
+# yaw rotation on top of the gait. That is closer to real use than stepping on
+# the spot, and it is worth knowing before drawing any conclusion from this file
+# about how quiet a leg gets between steps.
 t_us,ax,ay,az,gx,gy,gz
 4159,,,,-548,-696,-1189
 8319,-2385,7899,-2764,,,

@@ -346,8 +346,9 @@ class ImpactTransientTests {
 	 * gives a jerk MAD of 0.0044 m/s², walking gives 0.216 -- **forty-nine times
 	 * larger**. Sensor noise is not the floor here; the wearer is.
 	 *
-	 * Fourteen seconds of ordinary walking in place. What makes the answer
-	 * credible without a camera is not the count on its own but its *regularity*:
+	 * Fourteen seconds of ordinary overground walking, in a circle. What makes
+	 * the answer credible without a camera is not the count on its own but its
+	 * *regularity*:
 	 * detections land about 1.26 s apart with little spread, which is one leg at
 	 * a normal cadence, and each is a single transient rather than a burst.
 	 */
@@ -429,8 +430,9 @@ class ImpactTransientTests {
 		)
 		// Human walking stance fraction is about 0.6. Anything near 0.5 or 0.75
 		// would mean the second event is not toe-off.
-		// Textbook overground walking is about 0.60. Walking in place runs a
-		// little higher, because the foot is not carried forward -- 0.64 here.
+		// Textbook walking is about 0.60, rising with slower cadence -- stance
+		// lengthens while swing does not. 0.64 at a 1256 ms stride is an
+		// unhurried walk, which is what this was.
 		assertTrue(
 			stance / stride in 0.50..0.75,
 			"stance fraction ${stance / stride} is not a walking duty cycle",
