@@ -320,6 +320,166 @@ Removing a recording means removing its baseline block.
 `everyCorpusBaselineKeyHasARecording` fails otherwise, so a recording that
 silently stops loading cannot quietly take its metrics out of the suite.
 
+## What a recording bakes in, and how long it stays useful
+
+Worth reading before a capture session, because most of what follows is decided
+at capture time and cannot be changed afterwards.
+
+### `.pfr` stores fused output, so the whole firmware signal chain is frozen
+
+A frame holds a rotation, a position and an acceleration — the *output* of the
+tracker's fusion filter. Everything upstream of that is baked in and not
+recoverable:
+
+- **VQF and its parameters.** Note that tuned `DefaultVQFParams` currently reach
+  only MPU9250 (kmatzen/SlimeVR-Tracker-ESP#4); every softfusion IMU runs stock
+  VQF defaults.
+- **Rest detection and rest-gated bias correction**, including `restThAcc`,
+  which sits near a measured cliff.
+- **The sensor error model** — gyroscope scale, accelerometer bias and scale —
+  applied on the tracker before fusion.
+- **Online estimation**, which is recursive and evolves *during* the session.
+- **FIFO and output data rate**: which samples reached fusion at all.
+
+So a recording answers *"how does the server behave given this tracker
+behaviour"*. It stays valid for that forever. What it cannot do is answer
+*"how does the server behave given current tracker behaviour"* once the firmware
+changes.
+
+That distinction matters more than it sounds. A recording does not become
+**wrong**, it becomes **unrepresentative** — and for regression-testing the
+server, fixed-and-unrepresentative is exactly what a baseline wants. It is only
+a problem for questions of the form *"is method A better than method B on real
+data"*, where it matters that the data resembles what users have.
+
+### Raw samples: what makes a recording firmware-independent
+
+Raw gyroscope and accelerometer counts, captured alongside the fused output.
+With them, any fusion configuration and any calibration can be re-run offline,
+forever — the recording stops being tied to the firmware that made it.
+
+`record-corpus` captures them automatically when the trackers support it,
+writing a third file per sensor:
+
+```
+walk-in-place.pfr     the fused recording
+walk-in-place.meta    how it was captured
+walk-in-place.imu     raw pre-calibration samples
+```
+
+The `.imu` is written in `# slimevr-imu-log v1` — the format
+`tools/fusion-bench` in the firmware repository already parses — so a
+wirelessly captured log replays through the existing bench with no new tooling:
+
+```sh
+./build/fusion-bench run walk-in-place.imu
+```
+
+That has been verified end to end against a server-written file, including one
+carrying gap markers.
+
+**Needs firmware with raw sample streaming** (kmatzen/SlimeVR-Tracker-ESP#23).
+Without it nothing streams, the recording is fused-only, and `record-corpus`
+says so — that state is not recoverable afterwards.
+
+#### Gaps are marked, never concatenated over
+
+Losing a fused rotation packet is harmless; the next supersedes it. **Losing a
+raw sample corrupts every re-fusion run downstream of it**, silently, because
+the filter integrates a hole it cannot see.
+
+So a `.imu` never joins across a loss. Two independent kinds are counted apart,
+because they have different causes and different fixes:
+
+- **dropped on tracker** — its buffer overran and it discarded samples rather
+  than overwriting. It could not send fast enough.
+- **lost in transit** — batches that never arrived. The network dropped them.
+
+Both appear in the file header, and each hole gets a marker giving its *exact*
+size:
+
+```
+# INCOMPLETE -- see gap markers below
+# gyro: 304 samples in 2 run(s), 19 batches, 0 dropped on tracker, 3 lost in transit (1 batches)
+# gap gyro missing=3 from_us=5000 to_us=20000
+```
+
+The count is exact rather than estimated because sample times are *nominal* —
+accumulated from the configured sample period rather than read from a clock,
+since the configured period is what the on-device fusion integrates. That makes
+the timeline perfectly regular, so a gap's size is arithmetic.
+
+Markers are `#` comments, which the bench's parser skips, so a holed capture
+still loads — as two shorter captures with a documented hole between them,
+rather than as one continuous capture that silently jumps.
+
+### What the raw file still does not fix
+
+
+
+Raw IMU samples, captured alongside the fused output. With raw gyro and
+accelerometer counts you can re-run any fusion configuration, and any
+calibration, offline and forever.
+
+The firmware can already log them, and in the right place — `RawSampleLogger` is
+called *before* `calibrator.scaleAccelSample`, so a capture holds what the sensor
+produced rather than what the current calibration made of it. But as it stands it
+is `#ifdef RAW_SAMPLE_LOGGING`, writes over `Serial`, and covers one sensor at a
+time, so it cannot be used during a wireless multi-tracker session. Joining the
+two is the unbuilt half of kmatzen/SlimeVR-Tracker-ESP#3 ↔ #1.
+
+**Until that exists, every recording here is tied to the firmware that made it.**
+
+### What to do about it at capture time
+
+Since the recordings cannot yet be made firmware-independent, make them
+*interpretable* instead. A recording whose exact conditions are known can at
+least be reasoned about later; one whose conditions are unknown gets deleted.
+
+1. **Calibrate every tracker first, and finish.** Gyroscope scale is a manual
+   loop — capture, run `tools/fusion-bench gyro-scale` on a host, then
+   `SET GYROSCALE` over serial. Recording before that bakes in an uncorrected
+   scale error that no later firmware fixes.
+2. **Record the firmware build precisely.** `firmware` is filled from what the
+   tracker reports, and `scripts/get_git_commit.py` embeds the *branch name*, so
+   put the commit in `notes` as well.
+3. **Note the calibration values in force** in `notes`, and whether online
+   estimation was running. Otherwise the tracker's behaviour drifts within the
+   recording and nothing says so.
+4. **Prefer boards that build the full calibration flow.**
+   `GUIDED_ACCEL_CALIBRATION` is compiled out on `BOARD_GLOVE_IMU_SLIMEVR_DEV`
+   for want of flash, so captures from it are not comparable with the rest.
+5. **Include a still segment** at the start of every recording. It gives a later
+   reader something to estimate drift and bias against.
+
+## Sample timestamps
+
+Each frame optionally carries the instant its sample was taken, in the server's
+timebase (`TrackerFrameData.SAMPLE_TIMESTAMP`). It is written whenever the
+tracker's firmware reports sample times, and omitted otherwise, so a recording
+from older firmware is byte-identical to what it would have been before the field
+existed.
+
+It is here for the reason the rest of this file keeps repeating. The recorder
+ticks uniformly; real trackers do not report uniformly. The *spread* between
+trackers at one instant is the entire quantity `TimeAlignment` exists to remove,
+and it is not recoverable from a uniform frame rate. Without the field, every
+replayed tracker had an empty sample history, fewer than two were eligible, and
+the alignment pass returned having touched nothing — on every recording, on every
+run.
+
+Unlike `imu_type` and `stay_aligned.*`, this one could not have been repaired
+with a sidecar field afterwards, because the data was never written down. Hence
+adding it before the corpus exists rather than after.
+
+Absolute values are the capture machine's clock and carry no meaning on replay;
+`TrackerFramesPlayer` rebases them to the recording's earliest sample. Only the
+differences matter, and rebasing preserves both of the ones that do — the spread
+between trackers, and the interval between one tracker's samples.
+
+`record-corpus` warns when a capture produced no timestamps, for the same reason
+it warns about a missing IMU type.
+
 ## The gap this does not close
 
 `.pfr` stores **fused tracker output**, not raw IMU samples. So this

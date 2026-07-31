@@ -470,6 +470,94 @@ data class UDPPacket29RotationDataTimestamped(
 	}
 }
 
+/**
+ * A batch of raw, pre-calibration IMU samples, or the metadata needed to scale
+ * them.
+ *
+ * The tracker sends these only to servers advertising
+ * [ServerFeatureFlags.PROTOCOL_RAW_SAMPLES], so nothing changes for a server
+ * that does not want them. See kmatzen/SlimeVR-Tracker-ESP#23.
+ *
+ * Two shapes behind one packet id, discriminated by [batchType], because they
+ * belong to one stream and are useless apart -- the same reasoning as the
+ * firmware's existing `InspectionPacketType`.
+ *
+ * Sample times are *nominal*: accumulated from the configured sample period
+ * rather than read from a clock, because the configured period is what the
+ * on-device fusion integrates. Replaying them reproduces what the filter saw,
+ * and the regularity is what makes a missing-sample count exact rather than
+ * inferred. [realMicros] carries the tracker's true clock at flush so the gap
+ * between configured and actual output rate stays measurable.
+ */
+data class UDPPacket30RawSampleBatch(
+	var batchType: Int = 0,
+	var sensorName: String = "",
+	var accTs: Float = 0f,
+	var gyrTs: Float = 0f,
+	var accScale: Float = 0f,
+	var gyrScale: Float = 0f,
+	var kind: Int = 0,
+	/** Counts batches *produced*, so a gap means data was lost in transit. */
+	var sequence: Long = 0,
+	/** Cumulative samples the tracker discarded to buffer overrun. */
+	var dropped: Long = 0,
+	var baseNominalMicros: Long = 0,
+	var realMicros: Long = 0,
+	var sampleCount: Int = 0,
+	var samples: ShortArray = ShortArray(0),
+) : UDPPacket(30),
+	SensorSpecificPacket {
+	override var sensorId: Int = 0
+
+	val isStreamInfo: Boolean get() = batchType == TYPE_STREAM_INFO
+	val isSamples: Boolean get() = batchType == TYPE_SAMPLES
+
+	override fun readData(buf: ByteBuffer) {
+		batchType = buf.get().toInt() and 0xFF
+		sensorId = buf.get().toInt() and 0xFF
+		when (batchType) {
+			TYPE_STREAM_INFO -> {
+				accTs = buf.float
+				gyrTs = buf.float
+				accScale = buf.float
+				gyrScale = buf.float
+				val nameLength = buf.get().toInt() and 0xFF
+				val bytes = ByteArray(nameLength.coerceAtMost(buf.remaining()))
+				buf.get(bytes)
+				sensorName = String(bytes, Charsets.UTF_8)
+			}
+
+			TYPE_SAMPLES -> {
+				kind = buf.get().toInt() and 0xFF
+				sequence = buf.int.toLong() and 0xFFFFFFFFL
+				dropped = buf.int.toLong() and 0xFFFFFFFFL
+				baseNominalMicros = buf.long
+				realMicros = buf.int.toLong() and 0xFFFFFFFFL
+				val declared = buf.short.toInt() and 0xFFFF
+				// Trust the buffer over the declared count. A truncated datagram
+				// would otherwise throw here, and one malformed packet must not
+				// take down the receive loop mid-capture.
+				sampleCount = minOf(declared, buf.remaining() / 6)
+				samples = ShortArray(sampleCount * 3)
+				for (i in samples.indices) {
+					samples[i] = buf.short
+				}
+			}
+		}
+	}
+
+	// Generated equals/hashCode would compare the ShortArray by identity, which
+	// is the wrong answer for a data class carrying one.
+	override fun equals(other: Any?): Boolean = this === other
+
+	override fun hashCode(): Int = System.identityHashCode(this)
+
+	companion object {
+		const val TYPE_STREAM_INFO = 0
+		const val TYPE_SAMPLES = 1
+	}
+}
+
 data class UDPPacket200ProtocolChange(
 	var targetProtocol: Int = 0,
 	var targetProtocolVersion: Int = 0,

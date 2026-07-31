@@ -7,6 +7,14 @@ enum class TrackerFrameData(val id: Int) {
 	TRACKER_POSITION_ENUM(3),
 	ACCELERATION(4),
 	RAW_ROTATION(5),
+
+	/**
+	 * When the sample this frame came from was taken, in the server's timebase.
+	 *
+	 * Appended as id 6 rather than woven in, so a `.pfr` written before this
+	 * existed simply does not set the flag and reads back exactly as it did.
+	 */
+	SAMPLE_TIMESTAMP(6),
 	;
 
 	val flag: Int = 1 shl id

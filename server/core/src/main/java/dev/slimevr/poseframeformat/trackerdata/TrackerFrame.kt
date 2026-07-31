@@ -12,6 +12,21 @@ data class TrackerFrame(
 	val position: Vector3? = null,
 	val acceleration: Vector3? = null,
 	val rawRotation: Quaternion? = null,
+	/**
+	 * Instant the sample behind this frame was taken, in the server's timebase,
+	 * or null when the tracker's firmware does not report sample timestamps.
+	 *
+	 * Recorded per frame rather than per recording because the quantity that
+	 * matters is the *difference* between trackers at one instant. That spread
+	 * is what [dev.slimevr.tracking.trackers.TimeAlignment] exists to remove,
+	 * and it is not recoverable from a uniform frame rate: the recorder ticks
+	 * evenly, the trackers do not.
+	 *
+	 * Absolute values are the capture machine's clock and mean nothing on
+	 * replay; [dev.slimevr.poseframeformat.player.TrackerFramesPlayer] rebases
+	 * them. Stored raw so the file stays a faithful record.
+	 */
+	val sampleServerMicros: Long? = null,
 ) {
 	val dataFlags: Int
 
@@ -35,6 +50,9 @@ data class TrackerFrame(
 		}
 		if (rawRotation != null) {
 			initDataFlags = TrackerFrameData.RAW_ROTATION.add(initDataFlags)
+		}
+		if (sampleServerMicros != null) {
+			initDataFlags = TrackerFrameData.SAMPLE_TIMESTAMP.add(initDataFlags)
 		}
 
 		dataFlags = initDataFlags
@@ -73,6 +91,16 @@ data class TrackerFrame(
 		null
 	}
 
+	/**
+	 * When the sample behind this frame was taken, or null if the recording
+	 * carries no timestamps.
+	 */
+	fun tryGetSampleServerMicros(): Long? = if (hasData(TrackerFrameData.SAMPLE_TIMESTAMP)) {
+		sampleServerMicros
+	} else {
+		null
+	}
+
 	fun hasRotation(): Boolean = hasData(TrackerFrameData.ROTATION)
 
 	fun hasPosition(): Boolean = hasData(TrackerFrameData.POSITION)
@@ -105,12 +133,19 @@ data class TrackerFrame(
 			// If the rawRotation is the same as rotation, there's no point in saving it, set it back to null
 			if (rawRotation == rotation) rawRotation = null
 
+			// Only when the firmware actually reports it. Zero means "never
+			// timestamped", and writing that would make a recording claim every
+			// tracker was sampled at the same instant -- the exact fiction the
+			// field exists to avoid.
+			val sampleServerMicros = tracker.lastSampleServerMicros.takeIf { it > 0L }
+
 			return TrackerFrame(
 				trackerPosition,
 				rotation,
 				position,
 				acceleration,
 				rawRotation,
+				sampleServerMicros,
 			)
 		}
 	}

@@ -65,6 +65,11 @@ object PfrIO {
 		if (trackerFrame.hasData(TrackerFrameData.RAW_ROTATION)) {
 			writeQuaternion(outputStream, trackerFrame.rawRotation!!)
 		}
+		// Last, matching its flag id: fields are read in flag order, so
+		// appending here is what keeps every older recording readable unchanged.
+		if (trackerFrame.hasData(TrackerFrameData.SAMPLE_TIMESTAMP)) {
+			outputStream.writeLong(trackerFrame.sampleServerMicros!!)
+		}
 	}
 
 	fun writeFrames(outputStream: DataOutputStream, frames: PoseFrames) {
@@ -144,6 +149,10 @@ object PfrIO {
 		if (TrackerFrameData.RAW_ROTATION.check(dataFlags)) {
 			rawRotation = readQuaternion(inputStream)
 		}
+		var sampleServerMicros: Long? = null
+		if (TrackerFrameData.SAMPLE_TIMESTAMP.check(dataFlags)) {
+			sampleServerMicros = inputStream.readLong()
+		}
 
 		return TrackerFrame(
 			designation,
@@ -151,6 +160,7 @@ object PfrIO {
 			position,
 			acceleration,
 			rawRotation,
+			sampleServerMicros,
 		)
 	}
 

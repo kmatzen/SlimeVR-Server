@@ -283,6 +283,8 @@ class CorpusCaptureTests {
 						offsets = emptyMap(),
 						stayAligned = null,
 					),
+					raw = emptyList(),
+					rawSamples = 0,
 					warnings = emptyList(),
 				)
 			},
