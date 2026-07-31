@@ -52,7 +52,14 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 	 * about a capture session is persisted on either side.
 	 */
 	fun setRawSampleStreaming(streaming: Boolean) {
-		if (streaming) rawSampleCollector.start() else rawSampleCollector.stop()
+		// `start()` clears what has been collected, so a repeat of the start
+		// command during a capture must not call it -- the command is repeated
+		// precisely because a single datagram is not reliable.
+		if (streaming) {
+			if (!rawSampleCollector.isCapturing) rawSampleCollector.start()
+		} else {
+			rawSampleCollector.stop()
+		}
 		synchronized(connections) {
 			for (connection in connections) {
 				try {

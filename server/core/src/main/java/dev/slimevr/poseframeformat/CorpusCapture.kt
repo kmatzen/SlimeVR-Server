@@ -9,6 +9,7 @@ import io.eiren.util.logging.LogManager
 import java.io.File
 import java.time.LocalDate
 import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 /**
  * Captures a corpus-ready recording: a `.pfr` and the `.meta` sidecar that
@@ -149,6 +150,28 @@ class CorpusCapture(private val server: VRServer) {
 		val collector = server.trackersServer.rawSampleCollector
 		server.trackersServer.setRawSampleStreaming(true)
 
+		// Repeated for the length of the capture, because the start command is a
+		// UDP datagram sent once to whoever was connected at that instant.
+		//
+		// Two ways that silently produced a fused-only recording on hardware: the
+		// datagram was lost, or the tracker reconnected after it was sent -- and a
+		// tracker reboots for all sorts of reasons, including a serial monitor
+		// attaching. Neither produced an error. The capture ran its full length,
+		// wrote its files, and contained no raw samples.
+		//
+		// `setStreaming` is idempotent on the tracker, so a repeat costs one small
+		// packet a second and removes both failures.
+		val keepStreaming = thread(isDaemon = true, name = "corpus-raw-keepalive") {
+			try {
+				while (!Thread.currentThread().isInterrupted) {
+					Thread.sleep(RAW_KEEPALIVE_MILLIS)
+					server.trackersServer.setRawSampleStreaming(true)
+				}
+			} catch (_: InterruptedException) {
+				// Capture finished; nothing to clean up.
+			}
+		}
+
 		val future = recorder.startFrameRecording(numFrames, interval, recordable) { progress ->
 			onProgress?.invoke(progress.frame, progress.totalFrames)
 		}
@@ -159,6 +182,7 @@ class CorpusCapture(private val server: VRServer) {
 		val frames = try {
 			future.get((seconds * 2f).toLong() + 30L, TimeUnit.SECONDS)
 		} finally {
+			keepStreaming.interrupt()
 			server.trackersServer.setRawSampleStreaming(false)
 		}
 
@@ -411,5 +435,8 @@ class CorpusCapture(private val server: VRServer) {
 
 		/** Sample rate used when the operator does not name one. */
 		const val DEFAULT_RATE_HZ = 100f
+
+		/** How often the raw-streaming start command is repeated during a capture. */
+		const val RAW_KEEPALIVE_MILLIS = 1000L
 	}
 }
