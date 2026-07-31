@@ -68,7 +68,15 @@ class ImpactTransientDetector(
 	 * samples. 150 ms is comfortably below the fastest plausible step and
 	 * comfortably above the ring.
 	 */
-	val refractoryMicros: Long = 150_000,
+	val refractoryMicros: Long = 350_000,
+	/**
+	 * Width of the window the local scale is estimated over.
+	 *
+	 * Long enough to contain several strides, so a single impact cannot inflate
+	 * the scale that is meant to detect it, and short enough to track the
+	 * difference between standing and walking rather than averaging across it.
+	 */
+	val scaleWindowMicros: Long = 2_000_000,
 ) {
 	data class Impact(
 		val micros: Long,
@@ -128,16 +136,22 @@ class ImpactTransientDetector(
 			}
 		}
 
-		val mad = medianAbsoluteDeviation(jerk)
-		if (mad <= 0.0) {
+		val globalMad = medianAbsoluteDeviation(jerk)
+		if (globalMad <= 0.0) {
 			return Result(emptyList(), 0.0, 0.0, samples.size, samples.durationSeconds)
 		}
+		val localMad = localScale(jerk, samples.micros)
 
-		val threshold = mad * thresholdMads
 		val impacts = mutableListOf<Impact>()
 		var i = 0
 		var peak = 0.0
 		while (i < jerk.size) {
+			val mad = localMad[i]
+			if (mad <= 0.0) {
+				i++
+				continue
+			}
+			val threshold = mad * thresholdMads
 			if (jerk[i] / mad > peak) peak = jerk[i] / mad
 			if (jerk[i] < threshold) {
 				i++
@@ -151,7 +165,8 @@ class ImpactTransientDetector(
 			var j = i
 			while (j < jerk.size && samples.micros[j] - samples.micros[i] < refractoryMicros) {
 				if (jerk[j] > jerk[best]) best = j
-				if (jerk[j] / mad > peak) peak = jerk[j] / mad
+				val scale = localMad[j]
+				if (scale > 0.0 && jerk[j] / scale > peak) peak = jerk[j] / scale
 				j++
 			}
 			impacts.add(Impact(samples.micros[best + 1], jerk[best] / mad))
@@ -160,11 +175,42 @@ class ImpactTransientDetector(
 
 		return Result(
 			impacts = impacts,
-			noiseMad = mad,
+			noiseMad = globalMad,
 			peakToNoise = peak,
 			sampleCount = samples.size,
 			durationSeconds = samples.durationSeconds,
 		)
+	}
+
+	/**
+	 * MAD of the jerk in a window around each sample.
+	 *
+	 * Evaluated on a coarse grid and held constant between grid points: the
+	 * scale is a property of what the leg is doing over seconds, so computing it
+	 * per sample would cost a great deal to say the same thing.
+	 */
+	private fun localScale(jerk: DoubleArray, micros: LongArray): DoubleArray {
+		val out = DoubleArray(jerk.size)
+		val half = scaleWindowMicros / 2
+		var gridStart = 0
+		while (gridStart < jerk.size) {
+			val centre = micros[gridStart]
+			var lo = gridStart
+			while (lo > 0 && centre - micros[lo] < half) lo--
+			var hi = gridStart
+			while (hi < jerk.size - 1 && micros[hi] - centre < half) hi++
+
+			val window = jerk.copyOfRange(lo, hi + 1)
+			val mad = medianAbsoluteDeviation(window)
+
+			var gridEnd = gridStart
+			while (gridEnd < jerk.size && micros[gridEnd] - centre < scaleWindowMicros / 8) {
+				out[gridEnd] = mad
+				gridEnd++
+			}
+			gridStart = if (gridEnd > gridStart) gridEnd else gridStart + 1
+		}
+		return out
 	}
 
 	private fun medianAbsoluteDeviation(values: DoubleArray): Double {
