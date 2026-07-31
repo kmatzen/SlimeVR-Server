@@ -390,4 +390,68 @@ class ImpactTransientTests {
 		val result = ImpactTransientDetector().detect(stationary())
 		assertEquals(0, result.impacts.size, "fired at rest with the settings that detect gait")
 	}
+
+	// --- both edges of the contact interval ----------------------------------
+
+	/**
+	 * Toe-off is recoverable too, and the gait duty cycle is the proof.
+	 *
+	 * Issue #41 named this as the risk it could not resolve: touchdown is a
+	 * shock and toe-off is not, so the method might date one edge of the contact
+	 * interval and never the other.
+	 *
+	 * It dates both. What makes that believable without a camera is not the
+	 * count but the *shape*: stance is about 60% of a human gait cycle and swing
+	 * about 40%, and nothing in this detector knows that. If it were firing on
+	 * something other than a strike and a release it would have no reason to
+	 * reproduce the ratio.
+	 */
+	@Test
+	@DisplayName("pairs each strike with a toe-off, at a human stance fraction")
+	fun `contact intervals have a gait duty cycle`() {
+		val log = fixture("shin-walk-lsm6dsv.imu")
+		val contacts = ImpactTransientDetector().detectContacts(log)
+		val paired = contacts.filter { it.toeOffMicros != null }
+
+		println("contacts: ${contacts.size}, paired: ${paired.size}")
+		val stances = paired.mapNotNull { it.stanceMicros }.map { it / 1000.0 }
+		val strides = contacts.zipWithNext { a, b -> (b.strikeMicros - a.strikeMicros) / 1000.0 }
+		val stance = stances.sorted()[stances.size / 2]
+		val stride = strides.sorted()[strides.size / 2]
+		println("  median stance %.0f ms, median stride %.0f ms, duty %.2f".format(stance, stride, stance / stride))
+
+		// The final strike has no stride after it to bound the search, so it can
+		// never pair; anything much worse than that means releases are being
+		// missed rather than legitimately absent.
+		assertTrue(
+			paired.size >= contacts.size - 2,
+			"only ${paired.size} of ${contacts.size} strikes found a release",
+		)
+		// Human walking stance fraction is about 0.6. Anything near 0.5 or 0.75
+		// would mean the second event is not toe-off.
+		// Textbook overground walking is about 0.60. Walking in place runs a
+		// little higher, because the foot is not carried forward -- 0.64 here.
+		assertTrue(
+			stance / stride in 0.50..0.75,
+			"stance fraction ${stance / stride} is not a walking duty cycle",
+		)
+	}
+
+	/**
+	 * And the lower threshold that finds a release must not reach into a
+	 * stationary capture.
+	 *
+	 * This is the reason releases are searched for only *after* a strike. The
+	 * loudest sample in a still recording reaches about 11 times its own local
+	 * scale, which is well inside the range a toe-off occupies -- so a detector
+	 * that simply lowered its threshold would report footfalls for anyone
+	 * standing still. Nothing precedes a release at rest, so nothing is looked
+	 * for.
+	 */
+	@Test
+	@DisplayName("no contacts at all in a stationary capture")
+	fun `no contacts at rest`() {
+		val contacts = ImpactTransientDetector().detectContacts(stationary())
+		assertEquals(0, contacts.size, "reported ${contacts.size} contacts on a device at rest")
+	}
 }
