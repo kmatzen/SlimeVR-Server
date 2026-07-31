@@ -10,6 +10,11 @@ validation, the replay driver, baseline keys, the CI table — is built and
 tested. Adding a recording is one console command and a two-file drop, with no
 code change.
 
+**Start at [Building the dataset](#building-the-dataset)** if you are planning a
+session rather than adding a file. It covers what unlocks at how many trackers —
+several open questions need far fewer than a full body — and the decisions that
+have to be made before anything is recorded rather than after.
+
 ## Why this exists when synthetic motion already does
 
 `SyntheticMotion` gives repeatability, isolation, and no assets to maintain. It
@@ -212,6 +217,84 @@ stay_aligned.standing.lower_leg_deg = 1.0
 
 These are the same class of gap as the missing sample rate, and worth the same
 treatment: cheap to record at capture time, impossible to recover later.
+
+## Building the dataset
+
+The tooling is finished. What gates the corpus now is how many trackers are on a
+body, and a handful of decisions that become irreversible the moment anything is
+recorded.
+
+### The recordings unlock at different tracker counts
+
+The table below implies a full body, which makes the corpus look like an
+all-or-nothing prospect. It is not. The open questions need different numbers,
+and the cheapest ones need very few:
+
+| trackers | what it unblocks |
+| --- | --- |
+| **1** | Sensor characterisation through `tools/fusion-bench` — noise floor, gyroscope scale, ODR error, `restThAcc`. No skeleton involved, so no wearer either. |
+| **2**, on one leg | **Issue #3's head-to-head.** `KinematicHeading` solves relative heading across a *single* hinge, so a thigh and a shin are the whole requirement. |
+| **5** — hip, both thighs, both shins | Issue #5's contact timing, and issue #4's segment deformation under real noise. |
+| **7** — the above plus chest and head | Issue #6's jump case, and anything about whole-body pose. |
+
+The single-tracker tier is not a consolation prize. A stationary desk capture is
+enough to measure the noise floor and to check the shipped `restThAcc` against
+it, and on the first device tried that margin turned out to be 4.5× the settled
+minimum — a tuning question answered with one tracker and no wearer.
+
+The two-tracker tier deserves particular attention. Issue #3 is the only route
+to bounded yaw this pair of repositories can still take, since the magnetometer
+path is closed as won't-validate on the firmware side, and it needs one hinge.
+
+### Decide these before the first session, not after
+
+Everything here is cheap now and awkward later. The list in *"What to do about
+it at capture time"* below covers the per-session mechanics; these are the ones
+that need settling once, in advance.
+
+1. **Where `.imu` sidecars live** — repository, LFS, or release assets. Raw runs
+   about 17 kB/s for eight trackers against ~35 kB/s for the fused `.pfr`, so it
+   is cheaper than what is already being paid, but five five-minute sessions is
+   still on the order of 75 MB. The `.pfr` and `.meta` pair belongs in git
+   regardless: it is what the suite gates on.
+2. **Whether an external position reference is in scope.** Issue #5's metric is
+   contact *timing* and issue #6's is vertical centre-of-mass error through
+   flight, and no IMU-only setup knows either. A lighthouse-tracked foot or a
+   pressure mat turns both from *self-consistent* into *correct*. The recordings
+   are worth having without one; the claims that can be made from them are
+   weaker, and it is better to know which before designing sessions around them.
+3. **The consent wording**, agreed before someone is standing in a room waiting
+   for it. `record-corpus` will not proceed without it, which is the point.
+
+### Capture so that recordings are comparable, not merely present
+
+- **Start every recording with a still segment.** It is what a later reader
+  estimates drift and bias against, and it costs seconds.
+- **Keep everything short except the drift recordings.** Yaw drift needs minutes
+  to develop; the leg corrections resolve in seconds, and a long recording
+  buries the interval that matters.
+- **For issue #3, the wearer's actual stance must differ from their captured
+  relaxed pose.** That is the ordinary case and needs no choreography, but it is
+  the whole discriminating power of the recording — measured on synthetic motion,
+  where the stance *is* the configured pose, Stay Aligned removes essentially all
+  injected drift and the comparison says nothing.
+- **Record a `known-bad-*` whenever a real complaint can be reproduced.** Those
+  are the hardest recordings to recreate later and the most valuable, because
+  they become their own fix-verification.
+
+### What a good first session looks like
+
+Not "a file exists". The suite already fails on a recording that cannot be
+loaded, and `record-corpus` already warns about the four ways a recording answers
+less than it appears to — no IMU type, Stay Aligned disabled, no sample
+timestamps, no raw samples.
+
+The criterion worth aiming at is **a recording that replays and produces a
+non-zero, non-degenerate residual.** Every `+legtweaks` metric currently reads
+`0.000000` on synthetic input, which gates *"the corrections still work"* and
+nothing finer. A graded number is the thing real data is for, and the first
+recording that produces one is the point at which the corpus starts paying for
+itself.
 
 ## What to capture, and why each one
 
