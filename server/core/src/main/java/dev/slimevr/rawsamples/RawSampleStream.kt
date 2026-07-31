@@ -189,10 +189,16 @@ class RawSampleStream(
 		// microsecond per sample. Measured on hardware, that split a clean
 		// 1824-sample capture into 114 runs and emitted 114 `missing=0` gap
 		// markers -- a file that looked shredded and was not.
+		// Compared as ">" rather than "!=" so a counter that goes *backwards*
+		// cannot shred the capture. A tracker-side bug once made this field
+		// underflow to 4294967294, which arrives here as -2: never greater than
+		// the running total, so never adopted, and unequal on every batch. Every
+		// batch became its own run. A drop count that decreases is nonsense, and
+		// treating nonsense as a discontinuity turns one bug into a ruined file.
 		val continues = current != null &&
 			sequence == expectedSequence &&
-			droppedTotal == droppedOnTracker &&
-			fifoDroppedTotal == droppedInFifo
+			droppedTotal <= droppedOnTracker &&
+			fifoDroppedTotal <= droppedInFifo
 
 		if (!continues) {
 			if (current != null) {

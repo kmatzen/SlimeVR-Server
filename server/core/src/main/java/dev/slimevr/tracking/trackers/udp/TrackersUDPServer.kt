@@ -525,6 +525,11 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 						packet.accScale,
 						packet.gyrScale,
 					)
+				} else if (packet.isStats) {
+					// Logged rather than collected: this exists to diagnose a
+					// capture, and the server log is where the rest of the
+					// capture's story already is.
+					LogManager.info("[TrackerServer] ${packet.statsLine()}")
 				} else if (packet.isSamples) {
 					val kind = RawSampleKind.fromId(packet.kind) ?: return
 					rawSampleCollector.samples(
