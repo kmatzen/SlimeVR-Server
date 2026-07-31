@@ -501,16 +501,59 @@ data class UDPPacket30RawSampleBatch(
 	var sequence: Long = 0,
 	/** Cumulative samples the tracker discarded to buffer overrun. */
 	var dropped: Long = 0,
+	/**
+	 * Cumulative samples the sensor's hardware FIFO discarded before the
+	 * firmware saw them.
+	 *
+	 * Separate from [dropped] because the causes are: the network path could not
+	 * keep up, versus the sensor drain loop could not. It is also the only hole
+	 * nothing else can see -- the batch sequence stays unbroken across one, and
+	 * the nominal clock closes over it.
+	 */
+	var fifoDropped: Long = 0,
 	var baseNominalMicros: Long = 0,
 	var realMicros: Long = 0,
 	var sampleCount: Int = 0,
 	var samples: ShortArray = ShortArray(0),
+	/** Diagnostic counters, only on [TYPE_STATS]. */
+	var stats: LongArray = LongArray(0),
+	var accSequence: Long = 0,
+	var gyrSequence: Long = 0,
+	var accBuffered: Int = 0,
+	var gyrBuffered: Int = 0,
 ) : UDPPacket(30),
 	SensorSpecificPacket {
 	override var sensorId: Int = 0
 
 	val isStreamInfo: Boolean get() = batchType == TYPE_STREAM_INFO
 	val isSamples: Boolean get() = batchType == TYPE_SAMPLES
+	val isStats: Boolean get() = batchType == TYPE_STATS
+
+	/**
+	 * One line naming what the streamer has done, for the server log.
+	 *
+	 * The tracker's own sequence numbers are the useful part: compared against
+	 * what arrived, they separate "the tracker never produced that batch" from
+	 * "the network lost it", which nothing else here can distinguish.
+	 */
+	fun statsLine(): String = (
+		"[RawStream:%d] push a=%d g=%d | flush=%d | batch a=%d g=%d | " +
+			"refused=%d sendfail=%d | fifo=%d | seq a=%d g=%d | buffered a=%d g=%d"
+		).format(
+		sensorId,
+		stats.getOrElse(0) { 0 },
+		stats.getOrElse(1) { 0 },
+		stats.getOrElse(2) { 0 },
+		stats.getOrElse(3) { 0 },
+		stats.getOrElse(4) { 0 },
+		stats.getOrElse(5) { 0 },
+		stats.getOrElse(6) { 0 },
+		stats.getOrElse(7) { 0 },
+		accSequence,
+		gyrSequence,
+		accBuffered,
+		gyrBuffered,
+	)
 
 	override fun readData(buf: ByteBuffer) {
 		batchType = buf.get().toInt() and 0xFF
@@ -527,10 +570,19 @@ data class UDPPacket30RawSampleBatch(
 				sensorName = String(bytes, Charsets.UTF_8)
 			}
 
+			TYPE_STATS -> {
+				stats = LongArray(8) { buf.int.toLong() and 0xFFFFFFFFL }
+				accSequence = buf.int.toLong() and 0xFFFFFFFFL
+				gyrSequence = buf.int.toLong() and 0xFFFFFFFFL
+				accBuffered = buf.short.toInt() and 0xFFFF
+				gyrBuffered = buf.short.toInt() and 0xFFFF
+			}
+
 			TYPE_SAMPLES -> {
 				kind = buf.get().toInt() and 0xFF
 				sequence = buf.int.toLong() and 0xFFFFFFFFL
 				dropped = buf.int.toLong() and 0xFFFFFFFFL
+				fifoDropped = buf.int.toLong() and 0xFFFFFFFFL
 				baseNominalMicros = buf.long
 				realMicros = buf.int.toLong() and 0xFFFFFFFFL
 				val declared = buf.short.toInt() and 0xFFFF
@@ -555,6 +607,7 @@ data class UDPPacket30RawSampleBatch(
 	companion object {
 		const val TYPE_STREAM_INFO = 0
 		const val TYPE_SAMPLES = 1
+		const val TYPE_STATS = 2
 	}
 }
 

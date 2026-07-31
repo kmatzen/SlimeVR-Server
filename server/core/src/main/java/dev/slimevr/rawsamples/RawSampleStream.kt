@@ -125,6 +125,23 @@ class RawSampleStream(
 	var droppedOnTracker: Int = 0
 		private set
 
+	/**
+	 * Cumulative samples the sensor's hardware FIFO discarded before the
+	 * firmware saw them.
+	 *
+	 * The hole nothing else could see. Those samples never reached the
+	 * streamer, so its own drop counter knows nothing about them; the batch
+	 * sequence stays unbroken, because the batches either side were produced
+	 * normally; and the nominal clock advances only for samples the firmware
+	 * processed, so the timeline closes over the gap instead of showing it.
+	 *
+	 * Without this a capture from an overrunning tracker reports itself
+	 * complete while missing data -- and an idle tracker overruns at roughly
+	 * twenty samples a minute, so that is the ordinary case.
+	 */
+	var droppedInFifo: Int = 0
+		private set
+
 	/** Batches that never arrived, inferred from gaps in the sequence. */
 	var lostBatches: Int = 0
 		private set
@@ -155,6 +172,7 @@ class RawSampleStream(
 		baseMicros: Long,
 		values: ShortArray,
 		count: Int,
+		fifoDroppedTotal: Int = 0,
 	) {
 		if (count <= 0) return
 		batches++
@@ -171,9 +189,16 @@ class RawSampleStream(
 		// microsecond per sample. Measured on hardware, that split a clean
 		// 1824-sample capture into 114 runs and emitted 114 `missing=0` gap
 		// markers -- a file that looked shredded and was not.
+		// Compared as ">" rather than "!=" so a counter that goes *backwards*
+		// cannot shred the capture. A tracker-side bug once made this field
+		// underflow to 4294967294, which arrives here as -2: never greater than
+		// the running total, so never adopted, and unequal on every batch. Every
+		// batch became its own run. A drop count that decreases is nonsense, and
+		// treating nonsense as a discontinuity turns one bug into a ruined file.
 		val continues = current != null &&
 			sequence == expectedSequence &&
-			droppedTotal == droppedOnTracker
+			droppedTotal <= droppedOnTracker &&
+			fifoDroppedTotal <= droppedInFifo
 
 		if (!continues) {
 			if (current != null) {
@@ -194,6 +219,9 @@ class RawSampleStream(
 		if (droppedTotal > droppedOnTracker) {
 			droppedOnTracker = droppedTotal
 		}
+		if (fifoDroppedTotal > droppedInFifo) {
+			droppedInFifo = fifoDroppedTotal
+		}
 
 		val run = internalRuns.last()
 		run.anchor(baseMicros)
@@ -204,13 +232,18 @@ class RawSampleStream(
 	}
 
 	/** True when every sample the tracker produced reached us. */
-	val isComplete: Boolean get() = droppedOnTracker == 0 && missingSamples == 0L && lostBatches == 0
+	val isComplete: Boolean
+		get() = droppedOnTracker == 0 && droppedInFifo == 0 && missingSamples == 0L && lostBatches == 0
 
-	fun summary(): String = "%s: %d samples in %d run(s), %d batches, %d dropped on tracker, %d lost in transit (%d batches)".format(
+	fun summary(): String = (
+		"%s: %d samples in %d run(s), %d batches, %d dropped in sensor FIFO, " +
+			"%d dropped on tracker, %d lost in transit (%d batches)"
+		).format(
 		kind.name.lowercase(),
 		sampleCount,
 		internalRuns.size,
 		batches,
+		droppedInFifo,
 		droppedOnTracker,
 		missingSamples,
 		lostBatches,

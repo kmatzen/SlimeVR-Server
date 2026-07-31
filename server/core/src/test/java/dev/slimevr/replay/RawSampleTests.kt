@@ -133,6 +133,46 @@ class RawSampleTests {
 	}
 
 	/**
+	 * A FIFO overrun is a hole nothing else can see, so it must split the run.
+	 *
+	 * Those samples were discarded by the sensor before the firmware read them:
+	 * the streamer's own drop counter knows nothing about them, the batch
+	 * sequence is unbroken because the batches either side were produced
+	 * normally, and the tracker's nominal clock advances only for samples it
+	 * processed -- so the timeline closes over the gap.
+	 *
+	 * Without this a capture from an overrunning tracker reports itself
+	 * complete while missing data, and an idle tracker overruns at roughly
+	 * twenty samples a minute.
+	 */
+	@Test
+	@DisplayName("a sensor FIFO overrun splits the run and is counted as its own cause")
+	fun `fifo overrun splits and is counted separately`() {
+		val s = stream()
+		s.accept(0, 0, 0, samples(1, 1, 1), 1, fifoDroppedTotal = 0)
+		s.accept(1, 0, step, samples(2, 2, 2), 1, fifoDroppedTotal = 4)
+
+		assertEquals(4, s.droppedInFifo)
+		assertEquals(0, s.droppedOnTracker, "a FIFO overrun is not a streamer buffer overrun")
+		assertEquals(0, s.lostBatches, "a FIFO overrun is not transit loss")
+		assertFalse(s.isComplete)
+		assertEquals(2, s.runs.size, "the run was joined across samples the sensor discarded")
+		assertTrue(s.summary().contains("4 dropped in sensor FIFO"))
+	}
+
+	@Test
+	@DisplayName("a capture with no FIFO overruns is still complete")
+	fun `no fifo overruns stays complete`() {
+		val s = stream()
+		s.accept(0, 0, 0, samples(1, 1, 1), 1, fifoDroppedTotal = 0)
+		s.accept(1, 0, step, samples(2, 2, 2), 1, fifoDroppedTotal = 0)
+
+		assertEquals(0, s.droppedInFifo)
+		assertTrue(s.isComplete)
+		assertEquals(1, s.runs.size)
+	}
+
+	/**
 	 * UDP reorders. A batch arriving late is not missing data, and counting it
 	 * as a hole would overstate the damage in a file people will act on.
 	 */

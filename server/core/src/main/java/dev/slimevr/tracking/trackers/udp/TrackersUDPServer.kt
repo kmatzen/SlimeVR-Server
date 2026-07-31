@@ -52,7 +52,14 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 	 * about a capture session is persisted on either side.
 	 */
 	fun setRawSampleStreaming(streaming: Boolean) {
-		if (streaming) rawSampleCollector.start() else rawSampleCollector.stop()
+		// `start()` clears what has been collected, so a repeat of the start
+		// command during a capture must not call it -- the command is repeated
+		// precisely because a single datagram is not reliable.
+		if (streaming) {
+			if (!rawSampleCollector.isCapturing) rawSampleCollector.start()
+		} else {
+			rawSampleCollector.stop()
+		}
 		synchronized(connections) {
 			for (connection in connections) {
 				try {
@@ -518,6 +525,11 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 						packet.accScale,
 						packet.gyrScale,
 					)
+				} else if (packet.isStats) {
+					// Logged rather than collected: this exists to diagnose a
+					// capture, and the server log is where the rest of the
+					// capture's story already is.
+					LogManager.info("[TrackerServer] ${packet.statsLine()}")
 				} else if (packet.isSamples) {
 					val kind = RawSampleKind.fromId(packet.kind) ?: return
 					rawSampleCollector.samples(
@@ -529,6 +541,7 @@ class TrackersUDPServer(private val port: Int, name: String, private val tracker
 						packet.baseNominalMicros,
 						packet.samples,
 						packet.sampleCount,
+						packet.fifoDropped.toInt(),
 					)
 				}
 			}
